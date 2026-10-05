@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aginti_wechat}
+      POSTGRES_USER: ${POSTGRES_USER:-aginti_wechat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - wechat-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aginti_wechat} -d ${POSTGRES_DB:-aginti_wechat}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [database-private]
+
+  gateway:
+    build: .
+    image: aginti-wechat:0.1.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-aginti_wechat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aginti_wechat}
+      PORT: 3230
+      CLOUD_BRIDGE_URL: ${CLOUD_BRIDGE_URL:-http://cloud:3220}
+    ports:
+      - "127.0.0.1:${WECHAT_BIND_PORT:-3230}:3230"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3230/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      database-private:
+      gateway-egress:
+      cloud-private:
+        aliases: [aginti-wechat]
+
+volumes:
+  wechat-postgres:
+
+networks:
+  database-private:
+    internal: true
+  gateway-egress:
+    driver: bridge
+  cloud-private:
+    name: overtree-wechat-bridge
+    external: true

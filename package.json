@@ -1,0 +1,23 @@
+{
+  "name": "aginti-wechat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Official WeChat Work Customer Service gateway for OverTree Cloud",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "for file in src/*.js; do node --check \"$file\" || exit 1; done",
+    "test": "NODE_ENV=test node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "1.0.7",
+    "express": "^5.1.0",
+    "fast-xml-parser": "^5.2.5",
+    "pg": "^8.16.3",
+    "ws": "^8.18.3"
+  }
+}

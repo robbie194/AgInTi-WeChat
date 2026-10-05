@@ -1,0 +1,6 @@
+wechat.example.com {
+  encode zstd gzip
+  @internal path_regexp internal (?i)^/internal/.*$
+  respond @internal "Not found." 404
+  reverse_proxy 127.0.0.1:3230
+}
