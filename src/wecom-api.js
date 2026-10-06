@@ -158,7 +158,7 @@ export class WeComApi {
 
   async downloadCustomerServiceFile(fileId, maxBytes = config.maxMediaBytes) {
     const token = await this.accessToken();
-    const response = await this.fetch(`${API}/kf/get_msg_file?access_token=${encodeURIComponent(token)}`, {
+    const response = await this.fetch(`${this.baseURL}/kf/get_msg_file?access_token=${encodeURIComponent(token)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file_id: fileId }),

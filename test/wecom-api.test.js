@@ -79,3 +79,37 @@ test("customer-service account preflight retries once after an expired access to
   assert.equal(tokenCalls, 2);
   assert.equal(accountCalls, 2);
 });
+
+test("customer-service file downloads use the configured API base URL", async () => {
+  const requests = [];
+  const api = new WeComApi({
+    corpId: "corp-test",
+    corpSecret: "test-api-secret",
+    baseURL: "https://wecom-proxy.example/cgi-bin",
+    fetchImpl: async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      if (new URL(url).pathname.endsWith("/gettoken")) {
+        return new Response(JSON.stringify({ access_token: "temporary-token", expires_in: 7200 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(Buffer.from("file-bytes"), {
+        status: 200,
+        headers: {
+          "content-type": "application/pdf",
+          "content-disposition": "attachment; filename=report.pdf",
+        },
+      });
+    },
+  });
+
+  const result = await api.downloadCustomerServiceFile("file-id", 1024);
+  assert.equal(result.buffer.toString(), "file-bytes");
+  assert.equal(result.contentType, "application/pdf");
+  assert.equal(result.filename, "report.pdf");
+  const fileRequest = requests.at(-1);
+  assert.equal(fileRequest.url, "https://wecom-proxy.example/cgi-bin/kf/get_msg_file?access_token=temporary-token");
+  assert.equal(fileRequest.options.method, "POST");
+  assert.deepEqual(JSON.parse(fileRequest.options.body), { file_id: "file-id" });
+});

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { downloadAndStoreGroupAttachments, downloadGroupMedia, groupBindCode, groupMediaAttachments, groupMessageText, groupMixedImages, mediaContentType, stripBotMention, truncateMarkdown } from "../src/smart-bot.js";
+import { downloadAndStoreGroupAttachments, downloadGroupMedia, groupBindCode, groupBotMentioned, groupMediaAttachments, groupMessageText, groupMixedImages, mediaContentType, stripBotMention, truncateMarkdown } from "../src/smart-bot.js";
 import { messageText, truncateUtf8 } from "../src/customer-service.js";
 
 test("group bot command parsing removes a leading mention and validates bind codes", () => {
@@ -9,6 +9,13 @@ test("group bot command parsing removes a leading mention and validates bind cod
   assert.equal(content, "绑定群 ABCDEFGH");
   assert.equal(groupBindCode(content), "ABCDEFGH");
   assert.equal(groupBindCode("绑定群 01234567"), "");
+});
+
+test("group processing requires an explicit bot mention while private messages do not", () => {
+  assert.equal(groupBotMentioned({ chattype: "group", msgtype: "text", text: { content: "@OverTree 请总结" } }), true);
+  assert.equal(groupBotMentioned({ chattype: "group", msgtype: "text", text: { content: "请总结" } }), false);
+  assert.equal(groupBotMentioned({ chattype: "group", msgtype: "text", text: { content: "<at user_id=\"bot\">OverTree</at> 请总结" } }), true);
+  assert.equal(groupBotMentioned({ chattype: "single", msgtype: "text", text: { content: "请总结" } }), true);
 });
 
 test("message formatting stays within byte limits without breaking UTF-8", () => {

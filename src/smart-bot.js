@@ -26,8 +26,25 @@ function cleanMessage(value) {
 function stripBotMention(value) {
   return cleanMessage(value)
     .replace(/^\s*<at[^>]*>.*?<\/at>\s*/i, "")
+    .replace(/^\s*<at[^>]*\/?>\s*/i, "")
     .replace(/^\s*@[\p{L}\p{N}_-]+\s*/u, "")
     .trim();
+}
+
+function groupMentionText(body = {}) {
+  if (body.msgtype === "text") return [body.text?.content];
+  if (body.msgtype === "voice") return [body.voice?.content];
+  if (body.msgtype === "mixed") {
+    return (Array.isArray(body.mixed?.msg_item) ? body.mixed.msg_item : [])
+      .filter((item) => item?.msgtype === "text")
+      .map((item) => item.text?.content);
+  }
+  return [];
+}
+
+function groupBotMentioned(body = {}) {
+  if (body.chattype !== "group") return true;
+  return groupMentionText(body).some((value) => /^(?:\s*<at\b[^>]*(?:\/>|>.*?<\/at>)|\s*@[\p{L}\p{N}_-]+)/iu.test(String(value || "")));
 }
 
 function truncateMarkdown(value, maxBytes = 15_000) {
@@ -340,6 +357,10 @@ export class SmartBotGroupProcessor {
         await finishSmartBotMessage(row.id);
         return;
       }
+      if (!groupBotMentioned(body)) {
+        await finishSmartBotMessage(row.id);
+        return;
+      }
       if (!["text", "mixed", "image", "file", "video", "voice"].includes(body.msgtype)) {
         await this.sendGroupText({
           chatId,
@@ -475,4 +496,4 @@ export function makeSmartBotClient(options) {
   return new WSClient(options);
 }
 
-export { downloadAndStoreGroupAttachments, downloadGroupMedia, groupBindCode, groupMediaAttachments, groupMessageText, groupMixedImages, mediaContentType, stripBotMention, truncateMarkdown };
+export { downloadAndStoreGroupAttachments, downloadGroupMedia, groupBindCode, groupBotMentioned, groupMediaAttachments, groupMessageText, groupMixedImages, mediaContentType, stripBotMention, truncateMarkdown };

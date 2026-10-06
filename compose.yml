@@ -17,7 +17,7 @@ services:
 
   gateway:
     build: .
-    image: aginti-wechat:0.1.7
+    image: aginti-wechat:0.1.8
     restart: unless-stopped
     depends_on:
       postgres:
