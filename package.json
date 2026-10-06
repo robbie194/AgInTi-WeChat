@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "check": "for file in src/*.js; do node --check \"$file\" || exit 1; done",
+    "check": "for file in src/*.js; do node --check \"$file\" || exit 1; done; for file in scripts/*.sh; do bash -n \"$file\" || exit 1; done",
     "test": "NODE_ENV=test node --test test/*.test.js"
   },
   "dependencies": {
