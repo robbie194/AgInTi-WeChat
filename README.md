@@ -32,7 +32,7 @@ Copy `.env.example` to `.env` and configure the server side only:
 - `CLOUD_BRIDGE_URL` with the Cloud private-network URL. Gateway reaches the `cloud` Compose service on the isolated `overtree-wechat-bridge` network; Cloud reaches Gateway through its `aginti-wechat` network alias.
 - A strong, freshly generated `POSTGRES_PASSWORD`, plus a shared secret in `CLOUD_BRIDGE_SHARED_SECRET` and `CLOUD_WECHAT_GATEWAY_SECRET`. The Gateway signs every internal request with a timestamp, one-time nonce and SHA-256 HMAC; Cloud rejects expired or replayed requests.
 - `WECHAT_DATA_ENCRYPTION_KEY` for queued WeChat callback/message payloads at rest.
-- Keep `WECHAT_ENABLED=false` until the Customer Service POC is complete. Keep `WECHAT_GROUP_BOT_ENABLED=false` until the separate external-customer-group test passes. If enabling it, configure `WECHAT_BOT_ID`/`WECHAT_BOT_SECRET` and the matching `CLOUD_WECHAT_GROUP_BOT_ID` in Cloud.
+- Keep `WECHAT_ENABLED=false` until the Customer Service POC is complete. Keep `WECHAT_GROUP_BOT_ENABLED=false` until the separate external-customer-group test passes. Cloud has matching safety gates: keep `CLOUD_WECHAT_CUSTOMER_SERVICE_ENABLED=false` and `CLOUD_WECHAT_GROUP_BOT_ENABLED=false` until the corresponding Gateway path is ready. If enabling the group path, configure `WECHAT_BOT_ID`/`WECHAT_BOT_SECRET` and the matching `CLOUD_WECHAT_GROUP_BOT_ID` in Cloud.
 
 Generate values without sending them in chat:
 
@@ -72,6 +72,8 @@ bash scripts/check-wecom-customer-service.sh
 ```
 
 The check only reads the WeChat Customer Service account list. It does not enable message synchronization or change either feature switch.
+
+After the callback and private-message test are ready, enable both sides deliberately: set `WECHAT_ENABLED=true` in this Gateway `.env` and `CLOUD_WECHAT_CUSTOMER_SERVICE_ENABLED=true` in the Cloud `.env`, then recreate the two application services. Leave both group switches false until the target customer-group test passes. The Cloud switch prevents users from creating binding codes while the Gateway is still intentionally offline.
 
 If you also want to test the optional API-mode Smart Bot, create it in WeCom and choose the long-connection mode. Record its Bot ID and Secret on the Gateway host:
 
