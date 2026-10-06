@@ -197,7 +197,7 @@ export class CustomerServiceProcessor {
     }
 
     const attachments = [];
-    for (const attachment of attachmentDetails(message)) {
+    for (const [attachmentIndex, attachment] of attachmentDetails(message).entries()) {
       const file = attachment.mediaType === "file"
         ? await this.api.downloadCustomerServiceFile(attachment.mediaId, this.config.maxMediaBytes)
         : await this.api.downloadMedia(attachment.mediaId, this.config.maxMediaBytes);
@@ -206,6 +206,7 @@ export class CustomerServiceProcessor {
         openKfId,
         externalUserId,
         messageId: upstreamMessageId,
+        attachmentIndex,
         filename,
         contentType: file.contentType,
         buffer: file.buffer,

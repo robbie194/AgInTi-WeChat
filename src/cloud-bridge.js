@@ -84,8 +84,8 @@ export class CloudBridgeClient {
     return this.request("GET", `/internal/wechat/v1/messages/${encodeURIComponent(messageId)}?${params}`);
   }
 
-  uploadAttachment({ openKfId, externalUserId, messageId, filename, contentType, buffer }) {
-    const pathname = `/internal/wechat/v1/attachments?${new URLSearchParams({ openKfId, externalUserId, messageId, filename })}`;
+  uploadAttachment({ channel = "wechat_customer_service", openKfId = "", externalUserId = "", botId = "", chatId = "", messageId, attachmentIndex = 0, filename, contentType, buffer }) {
+    const pathname = `/internal/wechat/v1/attachments?${new URLSearchParams({ channel, openKfId, externalUserId, botId, chatId, messageId, attachmentIndex: String(attachmentIndex), filename })}`;
     const timestamp = String(Math.floor(Date.now() / 1000));
     const nonce = crypto.randomBytes(18).toString("base64url");
     const signature = cloudBridgeSignature({ method: "PUT", path: pathname, timestamp, nonce, body: buffer, secret: this.secret });

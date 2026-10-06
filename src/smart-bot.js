@@ -50,6 +50,37 @@ function groupBindCode(content) {
   return match?.[1]?.toUpperCase() || "";
 }
 
+function groupMixedImages(body = {}) {
+  let attachmentIndex = 0;
+  return (Array.isArray(body.mixed?.msg_item) ? body.mixed.msg_item : [])
+    .flatMap((item, itemIndex) => {
+      if (item?.msgtype !== "image" || !item.image?.url || attachmentIndex >= 10) return [];
+      const image = { itemIndex, attachmentIndex, item };
+      attachmentIndex += 1;
+      return [image];
+    });
+}
+
+function groupMessageText(body = {}, attachments = []) {
+  if (body.msgtype === "text") return stripBotMention(body.text?.content);
+  if (body.msgtype !== "mixed") return "";
+  const attachmentByItemIndex = new Map(attachments
+    .filter((attachment) => Number.isInteger(attachment?.itemIndex))
+    .map((attachment) => [attachment.itemIndex, attachment]));
+  const parts = (Array.isArray(body.mixed?.msg_item) ? body.mixed.msg_item : []).map((item, itemIndex) => {
+    if (item?.msgtype === "text") return cleanMessage(item.text?.content);
+    if (item?.msgtype !== "image") return "";
+    const uploaded = attachmentByItemIndex.get(itemIndex);
+    return uploaded?.path ? `[图片已保存到项目：${uploaded.path}]` : "[图片未能保存到项目]";
+  }).filter(Boolean);
+  return stripBotMention(parts.join("\n"));
+}
+
+function mediaContentType(filename = "") {
+  const extension = String(filename).toLowerCase().match(/\.[a-z0-9]{1,8}$/)?.[0] || "";
+  return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" })[extension] || "application/octet-stream";
+}
+
 export class SmartBotGroupProcessor {
   constructor({ config = defaultConfig, bridge, clientFactory = (options) => new WSClient(options), pollIntervalMs = 800 }) {
     this.config = config;
@@ -168,17 +199,17 @@ export class SmartBotGroupProcessor {
     const body = frame.body || {};
     const chatId = String(body.chatid || "");
     const actorId = String(body.from?.userid || "");
-    const content = body.msgtype === "text" ? stripBotMention(body.text?.content) : "";
+    const content = groupMessageText(body);
     try {
       if (body.chattype !== "group" || !chatId) {
         await finishSmartBotMessage(row.id);
         return;
       }
-      if (body.msgtype !== "text") {
+      if (body.msgtype !== "text" && body.msgtype !== "mixed") {
         await this.sendGroupText({
           chatId,
           idempotencyKey: `unsupported-${body.msgid}`,
-          content: "目前群聊里的 OverTree @ 提问支持文字。图片和文件请发送到 OverTree 微信客服私聊，或直接上传到云端项目。",
+          content: "目前群聊里的 OverTree @ 提问支持文字和图文混排。单独图片、文件和语音请发到 OverTree 微信客服私聊，或直接上传到云端项目。",
         });
         await finishSmartBotMessage(row.id);
         return;
@@ -225,13 +256,45 @@ export class SmartBotGroupProcessor {
         return;
       }
 
+      const attachments = [];
+      const images = groupMixedImages(body);
+      if (images.some(({ item }) => !item.image.aeskey)) {
+        await this.sendGroupText({
+          chatId,
+          idempotencyKey: `media-key-missing-${body.msgid}`,
+          content: "企业微信没有提供这张图片的解密信息，OverTree 无法读取它。请重新发送图文消息，或把图片发到微信客服私聊。",
+        });
+        await finishSmartBotMessage(row.id);
+        return;
+      }
+      for (const candidate of images) {
+        const { item, itemIndex, attachmentIndex } = candidate;
+        const file = await this.client.downloadFile(item.image.url, item.image.aeskey);
+        if (!Buffer.isBuffer(file?.buffer) || !file.buffer.length) throw Object.assign(new Error("WeCom Smart Bot returned an empty image."), { statusCode: 502 });
+        if (file.buffer.length > this.config.maxMediaBytes) throw Object.assign(new Error("WeCom group image exceeds the configured media limit."), { statusCode: 413 });
+        const filename = String(file.filename || `wechat-group-image-${attachmentIndex + 1}.jpg`).split(/[\\/]/).pop();
+        const stored = await this.bridge.uploadAttachment({
+          channel: "wecom_smart_bot_group",
+          botId: this.config.groupBotId,
+          chatId,
+          messageId: `group-${body.msgid}`,
+          attachmentIndex,
+          filename,
+          contentType: mediaContentType(filename),
+          buffer: file.buffer,
+        });
+        attachments.push({ ...stored, itemIndex });
+      }
+      const prompt = groupMessageText(body, attachments);
+
       const receipt = await this.bridge.submitMessage({
         channel: "wecom_smart_bot_group",
         botId: this.config.groupBotId,
         chatId,
         actorId,
         messageId: `group-${body.msgid}`,
-        content,
+        content: prompt,
+        attachments,
       });
       const acknowledgement = await this.sendGroupText({
         chatId,
@@ -296,4 +359,4 @@ export function makeSmartBotClient(options) {
   return new WSClient(options);
 }
 
-export { groupBindCode, stripBotMention, truncateMarkdown };
+export { groupBindCode, groupMessageText, groupMixedImages, mediaContentType, stripBotMention, truncateMarkdown };
