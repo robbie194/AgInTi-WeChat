@@ -44,6 +44,17 @@ openssl rand -hex 32
 
 The first command is suitable for the shared bridge secret. For the encryption key, use the second command exactly and keep it unchanged across restarts. Use the third command for `POSTGRES_PASSWORD`; its hexadecimal alphabet is safe inside the Compose database URL. Do not commit `.env` or put secrets in client-side configuration.
 
+### Configure callback verification without sharing secrets
+
+After generating a fresh Token and EncodingAESKey in the WeCom admin page, run this on the Gateway server:
+
+```bash
+cd /opt/aginti-wechat
+bash scripts/configure-wecom-callback.sh
+```
+
+The script asks for CorpID and the callback keys, hides the key input, writes them to the mode-`600` server `.env`, makes a protected backup, and restarts only the Gateway. It explicitly keeps both `WECHAT_ENABLED` and `WECHAT_GROUP_BOT_ENABLED` set to `false`, so this only prepares URL verification; it does not start polling customer messages or connect a group bot. Never paste the callback keys into chat.
+
 ## Deploy alongside Cloud
 
 Cloud's Compose file creates the isolated `overtree-wechat-bridge` network, shared only by Cloud and the Gateway. Deploy the Gateway on the same Docker host after Cloud's Compose stack has created that network. The Gateway database stays on a separate internal network. The Gateway also has its own outbound network for official WeChat APIs; it does not join Cloud's database/Docker-proxy network.
