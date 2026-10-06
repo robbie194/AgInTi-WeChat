@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { WSClient } from "@wecom/aibot-node-sdk";
+import { decryptFile, WSClient } from "@wecom/aibot-node-sdk";
 import { config as defaultConfig } from "./config.js";
 import { cloudResultIdempotencyKey, isFailedCloudState } from "./cloud-bridge.js";
 import { decryptPayload } from "./encryption.js";
@@ -51,19 +51,44 @@ function groupBindCode(content) {
   return match?.[1]?.toUpperCase() || "";
 }
 
-function groupMixedImages(body = {}) {
+const GROUP_MEDIA_TYPES = new Set(["image", "file", "video"]);
+const GROUP_MEDIA_LABELS = { image: "图片", file: "文件", video: "视频" };
+
+function groupMediaAttachments(body = {}) {
   let attachmentIndex = 0;
-  return (Array.isArray(body.mixed?.msg_item) ? body.mixed.msg_item : [])
-    .flatMap((item, itemIndex) => {
-      if (item?.msgtype !== "image" || !item.image?.url || attachmentIndex >= 10) return [];
-      const image = { itemIndex, attachmentIndex, item };
-      attachmentIndex += 1;
-      return [image];
-    });
+  if (body.msgtype === "mixed") {
+    return (Array.isArray(body.mixed?.msg_item) ? body.mixed.msg_item : [])
+      .flatMap((item, itemIndex) => {
+        if (item?.msgtype !== "image" || !item.image?.url || attachmentIndex >= 10) return [];
+        const image = { itemIndex, attachmentIndex, item, mediaType: "image" };
+        attachmentIndex += 1;
+        return [image];
+      });
+  }
+  if (!GROUP_MEDIA_TYPES.has(body.msgtype) || !body[body.msgtype]?.url) return [];
+  return [{
+    itemIndex: null,
+    attachmentIndex: 0,
+    mediaType: body.msgtype,
+    item: { msgtype: body.msgtype, [body.msgtype]: body[body.msgtype] },
+  }];
+}
+
+function groupMixedImages(body = {}) {
+  return groupMediaAttachments(body).filter((attachment) => attachment.mediaType === "image");
 }
 
 function groupMessageText(body = {}, attachments = []) {
   if (body.msgtype === "text") return stripBotMention(body.text?.content);
+  if (body.msgtype === "voice") {
+    return stripBotMention(body.voice?.content || "群成员发送了一条语音消息，企业微信没有提供可用的转写文字。");
+  }
+  if (GROUP_MEDIA_TYPES.has(body.msgtype)) {
+    const uploaded = attachments.find((attachment) => attachment.itemIndex === null && attachment.path);
+    if (!uploaded) return `群成员发送的${GROUP_MEDIA_LABELS[body.msgtype]}未能保存到项目。`;
+    const name = String(uploaded.name || "").trim();
+    return `群成员发送的${GROUP_MEDIA_LABELS[body.msgtype]}${name ? `（${name}）` : ""}已保存到项目：${uploaded.path}`;
+  }
   if (body.msgtype !== "mixed") return "";
   const attachmentByItemIndex = new Map(attachments
     .filter((attachment) => Number.isInteger(attachment?.itemIndex))
@@ -79,7 +104,116 @@ function groupMessageText(body = {}, attachments = []) {
 
 function mediaContentType(filename = "") {
   const extension = String(filename).toLowerCase().match(/\.[a-z0-9]{1,8}$/)?.[0] || "";
-  return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" })[extension] || "application/octet-stream";
+  return ({
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+    ".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv", ".json": "application/json",
+    ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".zip": "application/zip", ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+  })[extension] || "application/octet-stream";
+}
+
+function nonRetryableMediaError(error) {
+  const statusCode = Number(error?.statusCode || error?.response?.status);
+  return statusCode >= 400 && statusCode < 500 && ![408, 409, 425, 429].includes(statusCode);
+}
+
+function attachmentFilename(headers) {
+  const disposition = String(headers.get("content-disposition") || "");
+  const utf8 = disposition.match(/filename\*=UTF-8''([^;\s]+)/i)?.[1];
+  const plain = disposition.match(/filename="?([^";\s]+)"?/i)?.[1];
+  let filename = utf8 || plain || "";
+  if (utf8) {
+    try { filename = decodeURIComponent(utf8); } catch {}
+  }
+  return String(filename).split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 160);
+}
+
+async function downloadGroupMedia(url, aesKey, { maxBytes, fetchImpl = fetch } = {}) {
+  let parsedUrl;
+  try { parsedUrl = new URL(String(url)); }
+  catch { throw Object.assign(new Error("WeCom attachment URL is invalid."), { statusCode: 400 }); }
+  if (parsedUrl.protocol !== "https:" || parsedUrl.username || parsedUrl.password) {
+    throw Object.assign(new Error("WeCom attachment URL is not a secure HTTPS URL."), { statusCode: 400 });
+  }
+  const response = await fetchImpl(parsedUrl, {
+    method: "GET",
+    redirect: "follow",
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw Object.assign(new Error("WeCom attachment download failed."), { statusCode: response.status });
+  }
+  if (response.url && new URL(response.url).protocol !== "https:") {
+    await response.body?.cancel().catch(() => {});
+    throw Object.assign(new Error("WeCom attachment download left HTTPS."), { statusCode: 400 });
+  }
+  const maxEncryptedBytes = maxBytes + 32;
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isSafeInteger(contentLength) && contentLength > maxEncryptedBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw Object.assign(new Error("WeCom attachment exceeds the configured media limit."), { statusCode: 413 });
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw Object.assign(new Error("WeCom attachment response has no body."), { statusCode: 502 });
+  const chunks = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxEncryptedBytes) {
+      await reader.cancel().catch(() => {});
+      throw Object.assign(new Error("WeCom attachment exceeds the configured media limit."), { statusCode: 413 });
+    }
+    chunks.push(Buffer.from(value));
+  }
+  let buffer;
+  try { buffer = decryptFile(Buffer.concat(chunks, size), aesKey); }
+  catch { throw Object.assign(new Error("WeCom attachment could not be decrypted."), { statusCode: 422 }); }
+  if (buffer.length > maxBytes) throw Object.assign(new Error("WeCom attachment exceeds the configured media limit."), { statusCode: 413 });
+  return { buffer, filename: attachmentFilename(response.headers) };
+}
+
+async function downloadAndStoreGroupAttachments({ body, downloadFile = downloadGroupMedia, bridge, botId, chatId, messageId, maxBytes }) {
+  const storedAttachments = [];
+  for (const candidate of groupMediaAttachments(body)) {
+    const media = candidate.item[candidate.mediaType] || {};
+    if (!media.url || !media.aeskey) continue;
+    let file;
+    try {
+      file = await downloadFile(media.url, media.aeskey, { maxBytes });
+    } catch (error) {
+      if (nonRetryableMediaError(error)) continue;
+      throw error;
+    }
+    if (!Buffer.isBuffer(file?.buffer) || !file.buffer.length) {
+      throw Object.assign(new Error("WeCom Smart Bot returned an empty group attachment."), { statusCode: 502 });
+    }
+    if (file.buffer.length > maxBytes) continue;
+    const fallback = `wechat-group-${candidate.mediaType}-${candidate.attachmentIndex + 1}${candidate.mediaType === "image" ? ".jpg" : candidate.mediaType === "video" ? ".mp4" : ".bin"}`;
+    const filename = String(file.filename || fallback).split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 160) || fallback;
+    let stored;
+    try {
+      stored = await bridge.uploadAttachment({
+        channel: "wecom_smart_bot_group",
+        botId,
+        chatId,
+        messageId: `group-${messageId}`,
+        attachmentIndex: candidate.attachmentIndex,
+        filename,
+        contentType: mediaContentType(filename),
+        buffer: file.buffer,
+      });
+    } catch (error) {
+      if (nonRetryableMediaError(error)) continue;
+      throw error;
+    }
+    storedAttachments.push({ ...stored, itemIndex: candidate.itemIndex, mediaType: candidate.mediaType });
+  }
+  return storedAttachments;
 }
 
 export class SmartBotGroupProcessor {
@@ -206,11 +340,11 @@ export class SmartBotGroupProcessor {
         await finishSmartBotMessage(row.id);
         return;
       }
-      if (body.msgtype !== "text" && body.msgtype !== "mixed") {
+      if (!["text", "mixed", "image", "file", "video", "voice"].includes(body.msgtype)) {
         await this.sendGroupText({
           chatId,
           idempotencyKey: `unsupported-${body.msgid}`,
-          content: "目前群聊里的 OverTree @ 提问支持文字和图文混排。单独图片、文件和语音请发到 OverTree 微信客服私聊，或直接上传到云端项目。",
+          content: "这类群消息暂时不能交给 OverTree 处理。请发文字、图片、文件、视频或带语音转写的消息。",
         });
         await finishSmartBotMessage(row.id);
         return;
@@ -225,7 +359,7 @@ export class SmartBotGroupProcessor {
         await this.sendGroupText({
           chatId,
           idempotencyKey: `bind-${body.msgid}`,
-          content: result.ok === false ? "群绑定码无效或已过期，请在 OverTree 重新生成。" : "这个企业内部群已绑定到 OverTree 项目。之后群内企业成员可以 @OverTree 提问；此机器人不能用于包含个人微信客户的外部联系人群。",
+          content: result.ok === false ? "群绑定码无效或已过期，请在 OverTree 重新生成。" : "这个群已绑定到 OverTree 项目。群内成员可以 @OverTree 提问，消息和支持的附件会进入所选项目会话。",
         });
         await finishSmartBotMessage(row.id);
         return;
@@ -257,35 +391,14 @@ export class SmartBotGroupProcessor {
         return;
       }
 
-      const attachments = [];
-      const images = groupMixedImages(body);
-      if (images.some(({ item }) => !item.image.aeskey)) {
-        await this.sendGroupText({
-          chatId,
-          idempotencyKey: `media-key-missing-${body.msgid}`,
-          content: "企业微信没有提供这张图片的解密信息，OverTree 无法读取它。请重新发送图文消息，或把图片发到微信客服私聊。",
-        });
-        await finishSmartBotMessage(row.id);
-        return;
-      }
-      for (const candidate of images) {
-        const { item, itemIndex, attachmentIndex } = candidate;
-        const file = await this.client.downloadFile(item.image.url, item.image.aeskey);
-        if (!Buffer.isBuffer(file?.buffer) || !file.buffer.length) throw Object.assign(new Error("WeCom Smart Bot returned an empty image."), { statusCode: 502 });
-        if (file.buffer.length > this.config.maxMediaBytes) throw Object.assign(new Error("WeCom group image exceeds the configured media limit."), { statusCode: 413 });
-        const filename = String(file.filename || `wechat-group-image-${attachmentIndex + 1}.jpg`).split(/[\\/]/).pop();
-        const stored = await this.bridge.uploadAttachment({
-          channel: "wecom_smart_bot_group",
-          botId: this.config.groupBotId,
-          chatId,
-          messageId: `group-${body.msgid}`,
-          attachmentIndex,
-          filename,
-          contentType: mediaContentType(filename),
-          buffer: file.buffer,
-        });
-        attachments.push({ ...stored, itemIndex });
-      }
+      const attachments = await downloadAndStoreGroupAttachments({
+        body,
+        bridge: this.bridge,
+        botId: this.config.groupBotId,
+        chatId,
+        messageId: body.msgid,
+        maxBytes: this.config.maxMediaBytes,
+      });
       const prompt = groupMessageText(body, attachments);
 
       const receipt = await this.bridge.submitMessage({
@@ -362,4 +475,4 @@ export function makeSmartBotClient(options) {
   return new WSClient(options);
 }
 
-export { groupBindCode, groupMessageText, groupMixedImages, mediaContentType, stripBotMention, truncateMarkdown };
+export { downloadAndStoreGroupAttachments, downloadGroupMedia, groupBindCode, groupMediaAttachments, groupMessageText, groupMixedImages, mediaContentType, stripBotMention, truncateMarkdown };

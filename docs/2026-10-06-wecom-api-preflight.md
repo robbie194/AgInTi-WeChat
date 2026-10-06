@@ -6,15 +6,15 @@
 
 Gateway 已实现用户绑定、微信客服消息同步、把文本和附件送入 Cloud 选定的项目会话，以及把任务结果发回同一客服会话。附件写入项目 `wechat-inbox/`，Cloud 仍是会话记录、Agent、模式路由和项目文件的唯一来源。两个功能开关在生产环境保持关闭；目标企业租户尚未完成真实消息验收。
 
-本次准备的 Gateway 版本为 `0.1.5`；生产仍运行 `0.1.3`，本次没有部署。
+本次准备的 Gateway 版本为 `0.1.6`；生产仍运行 `0.1.3`，本次没有部署。
 
 ## 回调域名与主域名备案范围
 
 当前实际回调地址是 `https://wechat.overtree.top/wecom/callback`，所以在“API 接收消息”里填写完整 URL；若另行配置 OAuth/JS-SDK 可信域名，则填写主机名 `wechat.overtree.top`，不要把协议和路径混进域名字段。
 
-备案主体属于主域名 `overtree.top`。阿里云备案说明：主域名已经备案时，子域名通常不需要单独备案；因此即使备案完成，`wechat.overtree.top` 也不会有独立于 `overtree.top` 的备案主体。企微仍需校验回调使用的实际主机名，并要求识别到的备案主体与企业微信主体相同或有关联关系。当前 `overtree.top` 没有 ICP 备案，增加 DNS 子域名、HTTPS 证书或域名所有权校验文件都不能补出这项备案主体关系。
+备案主体登记在主域名 `overtree.top`。工信部门备案 FAQ 说明：主域与二级域名使用同一接入商时，主域备案后使用二级域名通常无需单独备案；若接入商不同，二级域名接入商需要办理新增接入。因此，`overtree.top` 备案通过且接入关系符合要求时，`wechat.overtree.top` 通常沿用同一备案主体，不需要再创造一个子域名主体。企微回调仍填写实际主机名 `https://wechat.overtree.top/wecom/callback`；若配置 OAuth/JS-SDK 可信域名，也应填实际主机名 `wechat.overtree.top`。备案规则不保证企微后台一定自动接受该子域名，最终以实际域名校验能否保存为准。当前 `overtree.top` 没有 ICP 备案，添加 DNS 子域名、HTTPS 证书或域名所有权校验文件都不能补出备案主体关系。
 
-参考：[阿里云备案域名 FAQ](https://help.aliyun.com/zh/icp-filing/basic-icp-service/support/for-the-record-domain-faq)、[企业微信应用接入指引](https://wdk-docs.github.io/wework-docs/operation/guidelines-for-enterprise-wechat-application-access/)。
+参考：[工信部门备案 FAQ（一级域名与二级域名）](https://jxca.miit.gov.cn/bsfw/bszn/cjwt/art/2020/art_869445de6a9f40f99d.html)、[阿里云备案域名 FAQ](https://help.aliyun.com/zh/icp-filing/basic-icp-service/support/for-the-record-domain-faq)、[企业微信应用接入指引](https://wdk-docs.github.io/wework-docs/operation/guidelines-for-enterprise-wechat-application-access/)。
 
 ## 新增的服务器端 API 预检
 
@@ -37,6 +37,8 @@ bash scripts/check-wecom-customer-service.sh
 
 客户群资料 API 不是群消息回调；企业群发 API 创建的是需要员工确认发送的群发任务，不能直接作为逐条即时回复接口。会话内容存档可以在企业启用相应能力、员工告知以及外部参与者同意后用于读取留存消息，但它是需要企业配置和解密处理的数据归档通道，也不能单独提供机器人在群里实时发言的能力。
 
+群处理代码现在也可下载并保存企微 Smart Bot 长连接提供的图片、文件和视频附件到已绑定 Cloud 项目；媒体以流方式下载并受 `WECHAT_MAX_MEDIA_BYTES` 限制，默认上限 20 MiB，超限附件不入库，但同一消息的文字问题仍可处理。语音消息使用企微提供的转写文本，平台不提供可供此适配器归档的语音原件。输入和结果继续共用对应 OverTree 会话，外发项目文件仍按绑定时的“分享结果文件”选择生成短期下载链接。
+
 新增 `scripts/configure-wecom-smart-bot.sh`，管理员创建 API 模式机器人后，可在 Gateway 主机安全录入 Bot ID/Secret；脚本隐藏 Secret、保护 `.env` 备份，保持两个功能开关关闭，不会重启或连接服务。没有把它标记为目标客服群功能，也没有用网页协作或人工转发替代用户要求的真实群聊。只有在真实企业测试群确认机器人可加入且个人微信成员可见后，才继续做端到端验收。
 
 参考接口资料：
@@ -50,6 +52,6 @@ bash scripts/check-wecom-customer-service.sh
 ## 验证
 
 - `npm run check` 通过。
-- `npm test`：19 项通过，覆盖客服帐号预检、Smart Bot 凭证安全录入、access token 过期重试、回调加密、桥接签名和消息处理。
+- `npm test`：25 项通过，覆盖客服帐号预检、凭证安全录入、群图片/文件/视频下载归档和语音转写、媒体流大小限制、回调加密、桥接签名及消息幂等。
 - 使用占位 `.env` 执行服务器预检烟测：命令在联网前安全停止，未输出占位 Secret。
 - 尚未使用真实企业微信凭证联网验证。域名主体审核、回调 URL 保存、用户绑定、文件往返和客服群真实交互仍未验收。
