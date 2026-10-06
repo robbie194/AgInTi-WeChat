@@ -27,7 +27,7 @@ Node.js 22 or newer is required.
 
 Copy `.env.example` to `.env` and configure the server side only:
 
-- `WECHAT_CORP_ID`, `WECHAT_CORP_SECRET`, callback `Token`, and `EncodingAESKey` for the company-owned WeChat Customer Service app. The callback URL is `https://wechat.example.com/wecom/callback`.
+- `WECHAT_CORP_ID`, the Secret of a self-built app added under “微信客服 → 可调用接口的应用”, callback `Token`, and `EncodingAESKey`. The callback URL is `https://wechat.example.com/wecom/callback`; `WECHAT_CORP_SECRET` is the self-built app Secret used to obtain the enterprise access token, not a personal-WeChat credential.
 - `WECHAT_OPEN_KF_IDS` with the official Customer Service account ID(s) that this Gateway is allowed to synchronize.
 - `CLOUD_BRIDGE_URL` with the Cloud private-network URL. Gateway reaches the `cloud` Compose service on the isolated `overtree-wechat-bridge` network; Cloud reaches Gateway through its `aginti-wechat` network alias.
 - A strong, freshly generated `POSTGRES_PASSWORD`, plus a shared secret in `CLOUD_BRIDGE_SHARED_SECRET` and `CLOUD_WECHAT_GATEWAY_SECRET`. The Gateway signs every internal request with a timestamp, one-time nonce and SHA-256 HMAC; Cloud rejects expired or replayed requests.

@@ -118,7 +118,7 @@ export class WeComApi {
 
   listCustomerServiceAccounts({ offset = 0, limit = 100 } = {}) {
     return this.request("/kf/account/list", {
-      method: "GET",
+      method: "POST",
       body: { offset, limit },
     });
   }
@@ -138,7 +138,7 @@ export class WeComApi {
 
   async downloadMedia(mediaId, maxBytes = config.maxMediaBytes) {
     const token = await this.accessToken();
-    const url = new URL(`${API}/media/get`);
+    const url = new URL(`${this.baseURL}/media/get`);
     url.searchParams.set("access_token", token);
     url.searchParams.set("media_id", mediaId);
     const response = await this.fetch(url, { signal: AbortSignal.timeout(30_000) });

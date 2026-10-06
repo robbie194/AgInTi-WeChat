@@ -11,7 +11,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 read -r -p '企业微信 CorpID: ' corp_id
-read -r -s -p '微信客服 API Secret（输入隐藏）: ' api_secret
+read -r -s -p '可调用微信客服接口的自建应用 Secret（输入隐藏）: ' api_secret
 printf '\n'
 read -r -p '微信客服 open_kfid（多个用英文逗号分隔）: ' open_kf_ids
 

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { WeComApi } from "../src/wecom-api.js";
 
-test("customer-service account preflight uses the official GET JSON request without exposing credentials", async () => {
+test("customer-service account preflight uses the official POST JSON request without exposing credentials", async () => {
   let requestData;
   const server = http.createServer((request, response) => {
     const chunks = [];
@@ -27,18 +27,21 @@ test("customer-service account preflight uses the official GET JSON request with
     corpSecret: "never-print-this-api-secret",
     baseURL: `http://127.0.0.1:${port}/cgi-bin`,
     now: () => 1_000_000,
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, options) => {
       const parsed = new URL(url);
-      assert.equal(parsed.searchParams.get("corpid"), "corp-test");
-      assert.equal(parsed.searchParams.get("corpsecret"), "never-print-this-api-secret");
-      return { ok: true, json: async () => ({ access_token: "temporary-token", expires_in: 7200 }) };
+      if (parsed.pathname.endsWith("/gettoken")) {
+        assert.equal(parsed.searchParams.get("corpid"), "corp-test");
+        assert.equal(parsed.searchParams.get("corpsecret"), "never-print-this-api-secret");
+        return { ok: true, json: async () => ({ access_token: "temporary-token", expires_in: 7200 }) };
+      }
+      return fetch(url, options);
     },
   });
 
   try {
     const result = await api.listCustomerServiceAccounts({ offset: 100, limit: 100 });
     assert.equal(result.account_list[0].open_kfid, "kf-test");
-    assert.equal(requestData.method, "GET");
+    assert.equal(requestData.method, "POST");
     assert.equal(requestData.pathname, "/cgi-bin/kf/account/list");
     assert.equal(requestData.token, "temporary-token");
     assert.equal(requestData.contentType, "application/json");
@@ -55,11 +58,12 @@ test("customer-service account preflight retries once after an expired access to
     corpId: "corp-test",
     corpSecret: "test-api-secret",
     now: () => 1_000_000,
-    fetchImpl: async () => {
-      tokenCalls += 1;
-      return { ok: true, json: async () => ({ access_token: `temporary-token-${tokenCalls}`, expires_in: 7200 }) };
-    },
-    fetchGetWithJsonBodyImpl: async () => {
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith("/gettoken")) {
+        tokenCalls += 1;
+        return { ok: true, json: async () => ({ access_token: `temporary-token-${tokenCalls}`, expires_in: 7200 }) };
+      }
       accountCalls += 1;
       return {
         ok: true,

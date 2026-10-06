@@ -7,7 +7,7 @@ function fail(message) {
 }
 
 if (!config.corpId || !config.corpSecret || /replace-with/i.test(config.corpId) || /replace-with/i.test(config.corpSecret)) {
-  fail("尚未录入真实企业 CorpID 和微信客服 API Secret。请先运行 scripts/configure-wecom-customer-service.sh。");
+  fail("尚未录入真实企业 CorpID 和可调用微信客服接口的自建应用 Secret。请先运行 scripts/configure-wecom-customer-service.sh。");
 } else if (!config.openKfIds.length || config.openKfIds.some((id) => /replace-with/i.test(id))) {
   fail("尚未录入真实 open_kfid。请先运行 scripts/configure-wecom-customer-service.sh。");
 } else {
