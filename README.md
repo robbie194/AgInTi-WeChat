@@ -84,6 +84,15 @@ bash scripts/configure-wecom-smart-bot.sh
 
 The script hides the Secret, protects the `.env` backup and leaves both WeChat switches off. It does not restart the Gateway or connect the bot. A long connection avoids configuring a bot callback hostname; it does not prove that WeCom will allow that bot into an external-contact group.
 
+Before enabling the group path, verify the Bot ID and Secret without changing the Gateway or handling any group message:
+
+```bash
+cd /opt/aginti-wechat
+bash scripts/check-wecom-smart-bot.sh
+```
+
+The preflight opens one temporary official WebSocket connection, waits for authentication, then closes it. It refuses to run while the group switch is enabled and never prints the Secret.
+
 ## Deploy alongside Cloud
 
 Cloud's Compose file creates the isolated `overtree-wechat-bridge` network, shared only by Cloud and the Gateway. Deploy the Gateway on the same Docker host after Cloud's Compose stack has created that network. The Gateway database stays on a separate internal network. The Gateway also has its own outbound network for official WeChat APIs; it does not join Cloud's database/Docker-proxy network.
