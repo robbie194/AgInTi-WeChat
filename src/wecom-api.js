@@ -1,11 +1,57 @@
+import http from "node:http";
+import https from "node:https";
 import { config } from "./config.js";
 
 const API = "https://qyapi.weixin.qq.com/cgi-bin";
 
+function fetchGetWithJsonBody(url, { body, headers = {}, signal } = {}) {
+  const target = new URL(url);
+  const transport = target.protocol === "https:" ? https : http;
+  const payload = Buffer.isBuffer(body)
+    ? body
+    : Buffer.from(typeof body === "string" ? body : JSON.stringify(body ?? {}));
+  return new Promise((resolve, reject) => {
+    const request = transport.request(target, {
+      method: "GET",
+      headers: {
+        ...headers,
+        "Content-Length": String(payload.length),
+      },
+      signal,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("error", reject);
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          ok: Number(response.statusCode || 0) >= 200 && Number(response.statusCode || 0) < 300,
+          status: Number(response.statusCode || 0),
+          headers: { get: (name) => response.headers[String(name).toLowerCase()] || null },
+          json: async () => JSON.parse(text),
+        });
+      });
+    });
+    request.on("error", reject);
+    request.end(payload);
+  });
+}
+
 export class WeComApi {
-  constructor({ fetchImpl = fetch, now = () => Date.now() } = {}) {
+  constructor({
+    fetchImpl = fetch,
+    fetchGetWithJsonBodyImpl = fetchGetWithJsonBody,
+    now = () => Date.now(),
+    corpId = config.corpId,
+    corpSecret = config.corpSecret,
+    baseURL = API,
+  } = {}) {
     this.fetch = fetchImpl;
+    this.fetchGetWithJsonBody = fetchGetWithJsonBodyImpl;
     this.now = now;
+    this.corpId = corpId;
+    this.corpSecret = corpSecret;
+    this.baseURL = String(baseURL).replace(/\/+$/, "");
     this.token = "";
     this.tokenExpiresAt = 0;
     this.tokenRequest = null;
@@ -15,9 +61,9 @@ export class WeComApi {
     if (!force && this.token && this.tokenExpiresAt > this.now() + 5 * 60_000) return this.token;
     if (this.tokenRequest) return this.tokenRequest;
     this.tokenRequest = (async () => {
-      const url = new URL(`${API}/gettoken`);
-      url.searchParams.set("corpid", config.corpId);
-      url.searchParams.set("corpsecret", config.corpSecret);
+      const url = new URL(`${this.baseURL}/gettoken`);
+      url.searchParams.set("corpid", this.corpId);
+      url.searchParams.set("corpsecret", this.corpSecret);
       const response = await this.fetch(url, { signal: AbortSignal.timeout(15_000) });
       const body = await response.json();
       if (!response.ok || body.errcode) throw this.apiError(body, response.status, "Unable to obtain WeChat Work access token.");
@@ -31,15 +77,18 @@ export class WeComApi {
 
   async request(path, { method = "GET", body, query = {}, retryAuth = true } = {}) {
     const token = await this.accessToken();
-    const url = new URL(`${API}${path}`);
+    const url = new URL(`${this.baseURL}${path}`);
     url.searchParams.set("access_token", token);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
-    const response = await this.fetch(url, {
+    const requestOptions = {
       method,
       headers: body ? { "Content-Type": "application/json" } : undefined,
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30_000),
-    });
+    };
+    const response = method === "GET" && body
+      ? await this.fetchGetWithJsonBody(url, requestOptions)
+      : await this.fetch(url, requestOptions);
     const payload = await response.json().catch(() => ({}));
     if (payload.errcode === 40014 || payload.errcode === 42001) {
       this.token = "";
@@ -64,6 +113,13 @@ export class WeComApi {
     return this.request("/kf/sync_msg", {
       method: "POST",
       body: { open_kfid: openKfId, cursor, token: callbackToken, limit, voice_format: 0 },
+    });
+  }
+
+  listCustomerServiceAccounts({ offset = 0, limit = 100 } = {}) {
+    return this.request("/kf/account/list", {
+      method: "GET",
+      body: { offset, limit },
     });
   }
 
