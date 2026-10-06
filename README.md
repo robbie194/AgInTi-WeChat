@@ -8,10 +8,10 @@ An isolated official WeChat Work integration Gateway for OverTree Cloud. It hand
 - For private chat, the user opens the configured official WeChat Customer Service link and sends that code. Their WeChat `external_userid` is bound to that Cloud account and selected session.
 - Customer messages and supported attachments enter the existing Cloud `continueRun` path. Attachments are written to the selected project under `wechat-inbox/`. Results return to the same WeChat conversation; messages queued into one OverTree run share its result and the Gateway delivers that run result once.
 - Project files are only attached to outbound replies when the user opted into artifact sharing for that binding. Links expire after 24 hours and allow at most 10 downloads.
-- The optional Smart Bot path accepts `@OverTree` group text and text/image mixed messages using the official WebSocket SDK, stores supported mixed-message images in the selected Cloud project, and uses a separately bound Cloud session. Standalone group image/file/voice/video messages are not supported by this adapter. Whether a Smart Bot can join a group containing external WeChat customers must be verified in the target enterprise tenant before enabling it.
+- The optional Smart Bot path accepts `@OverTree` messages in **enterprise-internal groups only**, stores supported mixed-message images in the selected Cloud project, and uses a separately bound Cloud session. Standalone group image/file/voice/video messages are not supported by this adapter. WeCom Smart Bots do not support external-contact groups, so this path cannot serve a group containing a personal-WeChat customer, a support agent and OverTree.
 - The Gateway never logs in to a user's personal WeChat account and does not ask the user to install cc-connect or provide WeChat credentials.
 
-The Smart Bot adapter is a tenant POC candidate, not a promise that every personal-WeChat/customer group supports bots. It is distinct from customer-group chat archives and customer-group send-task APIs. See the detailed findings in OverTree Cloud's `docs/history/2026-10-05-wechat-agent-human-collaboration-architecture.md`.
+The Smart Bot adapter is only an internal-group POC. It must not be presented as a solution for customer external groups. It is distinct from customer-group chat archives and customer-group send-task APIs. See the latest findings in `docs/2026-10-06-wecom-external-group-limitations.md` and OverTree Cloud's `docs/history/2026-10-05-wechat-agent-human-collaboration-architecture.md`.
 
 ## Local checks
 
@@ -73,7 +73,7 @@ Add the Caddy snippet to the host reverse proxy with the real WeChat callback ho
 1. Configure the official WeChat Customer Service callback and app scope with a company-owned test service account.
 2. Sign into Cloud with a test email account, generate a code, bind an ordinary personal WeChat user, and test duplicate callbacks, text, image/file ingestion, Agent completion and outbound limits.
 3. Check that the same exchange appears in the selected Cloud session and that revoking the binding prevents future access.
-4. Test the Smart Bot only in a test tenant and group. Verify that a group containing an external personal-WeChat customer can add the bot, that `@OverTree` callbacks arrive with the expected chat/member fields, and that replies appear to every intended participant.
-5. If any group acceptance item fails, leave the group flag off. The Customer Service private route remains independently configurable.
+4. If piloting the optional Smart Bot adapter, use an enterprise-internal test group only. Do not expect it to join a customer external group.
+5. Keep the group flag off unless an internal-group pilot is explicitly needed. The Customer Service private route remains independently configurable.
 
 Don't describe the platform integration as zero-risk: official APIs avoid automating a user's personal WeChat client, while enterprise message processing still requires the company's normal customer notice, consent, retention and access controls.

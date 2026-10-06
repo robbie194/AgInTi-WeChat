@@ -225,7 +225,7 @@ export class SmartBotGroupProcessor {
         await this.sendGroupText({
           chatId,
           idempotencyKey: `bind-${body.msgid}`,
-          content: result.ok === false ? "群绑定码无效或已过期，请在 OverTree 重新生成。" : "这个群已绑定到 OverTree 项目。之后在群里 @OverTree 提问，客服成员也可以 @OverTree 协助追问。",
+          content: result.ok === false ? "群绑定码无效或已过期，请在 OverTree 重新生成。" : "这个企业内部群已绑定到 OverTree 项目。之后群内企业成员可以 @OverTree 提问；此机器人不能用于包含个人微信客户的外部联系人群。",
         });
         await finishSmartBotMessage(row.id);
         return;
