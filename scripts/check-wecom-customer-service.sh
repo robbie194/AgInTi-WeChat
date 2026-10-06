@@ -9,4 +9,18 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-node --env-file="$ENV_FILE" "$ROOT_DIR/scripts/check-wecom-customer-service.mjs"
+# The production host intentionally does not need a host-level Node installation.
+# Prefer the host runtime for local development, but run through the Gateway
+# image when dependencies are only available inside Docker.
+if [[ -d "$ROOT_DIR/node_modules" ]] && command -v node >/dev/null 2>&1; then
+  node --env-file="$ENV_FILE" "$ROOT_DIR/scripts/check-wecom-customer-service.mjs"
+  exit $?
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  printf 'Node dependencies are not installed and Docker is unavailable; run npm ci or install Docker first.\n' >&2
+  exit 1
+fi
+
+cd "$ROOT_DIR"
+docker compose run --rm --no-deps gateway node /app/scripts/check-wecom-customer-service.mjs
