@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { WSClient } from "@wecom/aibot-node-sdk";
 import { config as defaultConfig } from "./config.js";
+import { cloudResultIdempotencyKey, isFailedCloudState } from "./cloud-bridge.js";
 import { decryptPayload } from "./encryption.js";
 import {
   claimSmartBotMessage,
@@ -334,9 +335,11 @@ export class SmartBotGroupProcessor {
       return;
     }
 
-    const failed = ["failed", "error"].includes(state);
+    const failed = isFailedCloudState(state);
     const result = failed
-      ? "这次 OverTree 任务没有完成。请稍后重试，或打开 OverTree 查看任务状态。"
+      ? state === "stopped"
+        ? "这次 OverTree 任务因服务重启或停止而中断，结果没有完成。你可以稍后在 OverTree 会话中继续。"
+        : "这次 OverTree 任务没有完成。请稍后重试，或打开 OverTree 查看任务状态。"
       : String(receipt.result || receipt.reply || "OverTree 已完成处理，请在已绑定的 Cloud 会话中查看完整记录。");
     const fileLinks = Array.isArray(receipt.files) ? receipt.files.map((file) => String(file.url || "")).filter(Boolean) : [];
     const linksText = fileLinks.map((url) => `文件下载：${url}`).join("\n\n");
@@ -344,7 +347,7 @@ export class SmartBotGroupProcessor {
     const summary = truncateMarkdown(result, Math.max(100, 15_000 - linksBytes - 100));
     const delivery = await this.sendGroupText({
       chatId,
-      idempotencyKey: `result-${body.msgid}`,
+      idempotencyKey: cloudResultIdempotencyKey(receipt, body.msgid),
       content: [summary, linksText].filter(Boolean).join("\n\n"),
     });
     if (!delivery.sent) {

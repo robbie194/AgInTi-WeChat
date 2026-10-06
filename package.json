@@ -1,6 +1,6 @@
 {
   "name": "aginti-wechat",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Official WeChat Work Customer Service gateway for OverTree Cloud",

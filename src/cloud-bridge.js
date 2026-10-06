@@ -10,6 +10,16 @@ export function cloudBridgeSignature({ method, path, timestamp, nonce, body, sec
   return crypto.createHmac("sha256", secret).update(canonical).digest("base64url");
 }
 
+export function cloudResultIdempotencyKey(receipt, fallbackMessageId) {
+  const responseId = String(receipt?.responseId || "").trim();
+  const fallback = String(fallbackMessageId || "").trim();
+  return `result-${responseId || fallback}`;
+}
+
+export function isFailedCloudState(state) {
+  return ["failed", "error", "stopped"].includes(String(state || "").toLowerCase());
+}
+
 export function verifyCloudBridgeSignature({ method, path, timestamp, nonce, body, signature, secret, now = Date.now() }) {
   const seconds = Number(timestamp);
   if (!Number.isInteger(seconds) || Math.abs(Math.floor(now / 1000) - seconds) > 60) return false;

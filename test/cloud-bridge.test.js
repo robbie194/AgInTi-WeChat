@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CloudBridgeClient, cloudBridgeSignature, verifyCloudBridgeSignature } from "../src/cloud-bridge.js";
+import { CloudBridgeClient, cloudBridgeSignature, cloudResultIdempotencyKey, isFailedCloudState, verifyCloudBridgeSignature } from "../src/cloud-bridge.js";
 
 const secret = "a-32-character-test-secret-for-the-wechat-bridge";
 
@@ -51,4 +51,18 @@ test("Cloud bridge includes the stable attachment index in signed media uploads"
   assert.equal(url.searchParams.get("attachmentIndex"), "2");
   assert.equal(requestOptions.method, "PUT");
   assert.equal(requestOptions.body.toString(), "image-bytes");
+});
+
+test("one OverTree run produces one stable WeChat result id across queued messages", () => {
+  const receipt = { responseId: "9a366262-ddf5-45a7-9a3a-bd3c91ed6412" };
+
+  assert.equal(cloudResultIdempotencyKey(receipt, "event-1"), cloudResultIdempotencyKey(receipt, "event-2"));
+  assert.notEqual(cloudResultIdempotencyKey({ responseId: "run-a" }, "event-1"), cloudResultIdempotencyKey({ responseId: "run-b" }, "event-1"));
+  assert.equal(cloudResultIdempotencyKey({}, "event-1"), "result-event-1");
+});
+
+test("a stopped Cloud run is reported as an interruption instead of success", () => {
+  assert.equal(isFailedCloudState("stopped"), true);
+  assert.equal(isFailedCloudState("failed"), true);
+  assert.equal(isFailedCloudState("finished"), false);
 });

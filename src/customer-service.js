@@ -1,5 +1,6 @@
 import path from "node:path";
 import { decryptPayload } from "./encryption.js";
+import { cloudResultIdempotencyKey, isFailedCloudState } from "./cloud-bridge.js";
 import {
   claimInboundMessage,
   completeOutboundMessage,
@@ -269,9 +270,12 @@ export class CustomerServiceProcessor {
   }
 
   async deliverCloudResult({ row, receipt, openKfId, externalUserId, externalHash, upstreamMessageId }) {
-    const failed = ["failed", "error"].includes(cloudStatus(receipt));
+    const state = cloudStatus(receipt);
+    const failed = isFailedCloudState(state);
     const content = failed
-      ? "这次 OverTree 任务没有完成。请稍后重试，或打开 OverTree 查看任务状态。"
+      ? state === "stopped"
+        ? "这次 OverTree 任务因服务重启或停止而中断，结果没有完成。你可以稍后在 OverTree 会话中继续。"
+        : "这次 OverTree 任务没有完成。请稍后重试，或打开 OverTree 查看任务状态。"
       : String(receipt.result || receipt.reply || "OverTree 已完成处理，但没有返回可发送的文字摘要。请打开 OverTree 项目查看完整结果和文件。");
     const fileLinks = Array.isArray(receipt.files)
       ? receipt.files.map((file) => String(file.url || "")).filter(Boolean)
@@ -283,7 +287,7 @@ export class CustomerServiceProcessor {
       openKfId,
       externalUserId,
       externalHash,
-      stableId: `result-${upstreamMessageId}`,
+      stableId: cloudResultIdempotencyKey(receipt, upstreamMessageId),
       content: [summary, linksText].filter(Boolean).join("\n\n"),
     });
     if (result.limited) {
