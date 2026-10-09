@@ -68,7 +68,16 @@ export class CustomerServiceSyncWorker {
     if (!savedCallback) return;
     let cursor = state.cursor || "";
     for (let page = 0; page < this.maxPagesPerPoll; page += 1) {
-      const response = await this.api.syncMessages(openKfId, { cursor, callbackToken: savedCallback, limit: 100 });
+      let response;
+      try {
+        response = await this.api.syncMessages(openKfId, { cursor, callbackToken: savedCallback, limit: 100 });
+      } catch (error) {
+        if (Number(error.wecomCode || 0) !== 95007) throw error;
+        // Callback tokens expire after ten minutes. Clear the stale token and use
+        // WeCom's lower-frequency fallback until the next callback refreshes it.
+        await rememberCallbackToken(openKfId, "");
+        response = await this.api.syncMessages(openKfId, { cursor, callbackToken: "", limit: 100 });
+      }
       const messages = Array.isArray(response.msg_list) ? response.msg_list : [];
       const nextCursor = String(response.next_cursor || cursor);
       await saveSyncPage(openKfId, { cursor: nextCursor, messages });
