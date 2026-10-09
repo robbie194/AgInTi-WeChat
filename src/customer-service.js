@@ -33,6 +33,11 @@ function truncateUtf8(value, maxBytes = 1800) {
   return `${output}\n\n(回复较长，完整内容请在 OverTree 项目中查看。)`;
 }
 
+export function weComSendMessageId(reservationId) {
+  // The database reservation is a UUID (36 chars); WeCom kf/send_msg caps msgid at 32.
+  return String(reservationId || "").replace(/-/g, "").slice(0, 32);
+}
+
 function attachmentDetails(message) {
   const type = String(message.msgtype || "");
   if (type === "mixed") {
@@ -117,7 +122,7 @@ export class CustomerServiceProcessor {
     if (reservation.status === "sent") return { sent: true, reused: true };
     if (!reservation.allowed) return { sent: false, unknown: reservation.status === "unknown" };
     try {
-      await this.api.sendText(openKfId, externalUserId, truncateUtf8(content), reservation.id);
+      await this.api.sendText(openKfId, externalUserId, truncateUtf8(content), weComSendMessageId(reservation.id));
       await completeOutboundMessage(reservation.id, { sent: true });
       return { sent: true };
     } catch (error) {
