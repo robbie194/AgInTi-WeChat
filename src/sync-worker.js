@@ -63,6 +63,9 @@ export class CustomerServiceSyncWorker {
     const savedCallback = state.callback_token_enc
       ? decryptPayload(state.callback_token_enc, this.config.dataEncryptionKey).token
       : "";
+    // WeCom only permits kf/sync_msg after the callback event provides its short-lived token.
+    // Waiting here avoids an invalid request during startup before the first customer event.
+    if (!savedCallback) return;
     let cursor = state.cursor || "";
     for (let page = 0; page < this.maxPagesPerPoll; page += 1) {
       const response = await this.api.syncMessages(openKfId, { cursor, callbackToken: savedCallback, limit: 100 });
