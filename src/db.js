@@ -198,6 +198,14 @@ export async function reserveOutboundMessage({ openKfId, externalUserIdHash, mes
       [openKfId, externalUserIdHash, messageId]
     );
     if (existingRows.length) {
+      if (existingRows[0].status === "failed") {
+        await client.query(
+          "UPDATE wechat_outbound_messages SET status='sending',error_code=NULL,error='' WHERE id=$1",
+          [existingRows[0].id]
+        );
+        await client.query("COMMIT");
+        return { id: existingRows[0].id, status: "sending", allowed: true, retry: true };
+      }
       await client.query("COMMIT");
       return { id: existingRows[0].id, status: existingRows[0].status, allowed: existingRows[0].status === "sending" };
     }
