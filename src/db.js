@@ -197,27 +197,39 @@ export async function reserveOutboundMessage({ openKfId, externalUserIdHash, mes
       `SELECT id,status FROM wechat_outbound_messages WHERE open_kfid=$1 AND external_userid_hash=$2 AND upstream_msg_id=$3`,
       [openKfId, externalUserIdHash, messageId]
     );
-    if (existingRows.length) {
-      if (existingRows[0].status === "failed") {
-        await client.query(
-          "UPDATE wechat_outbound_messages SET status='sending',error_code=NULL,error='' WHERE id=$1",
-          [existingRows[0].id]
-        );
-        await client.query("COMMIT");
-        return { id: existingRows[0].id, status: "sending", allowed: true, retry: true };
-      }
+    if (existingRows.length && existingRows[0].status !== "failed") {
       await client.query("COMMIT");
       return { id: existingRows[0].id, status: existingRows[0].status, allowed: existingRows[0].status === "sending" };
     }
     const { rows: countRows } = await client.query(
-      `SELECT count(*)::int AS count FROM wechat_outbound_messages
-       WHERE open_kfid=$1 AND external_userid_hash=$2 AND status IN ('sending','sent','unknown')
-         AND COALESCE(sent_at,created_at) > now()-interval '48 hours'`,
+      `WITH latest_inbound AS (
+         SELECT max(received_at) AS received_at
+         FROM wechat_inbound_messages
+         WHERE open_kfid=$1 AND external_userid_hash=$2
+       )
+       SELECT latest_inbound.received_at > now()-interval '48 hours' AS window_open,
+         count(outbound.id)::int AS count
+       FROM latest_inbound
+       LEFT JOIN wechat_outbound_messages AS outbound
+         ON outbound.open_kfid=$1 AND outbound.external_userid_hash=$2
+         AND outbound.status IN ('sending','sent','unknown')
+         AND COALESCE(outbound.sent_at,outbound.created_at) > latest_inbound.received_at
+         AND COALESCE(outbound.sent_at,outbound.created_at) > now()-interval '48 hours'
+       GROUP BY latest_inbound.received_at`,
       [openKfId, externalUserIdHash]
     );
-    if (countRows[0].count >= 5) {
+    const quota = countRows[0] || { window_open: false, count: 0 };
+    if (!quota.window_open || quota.count >= 5) {
       await client.query("ROLLBACK");
       return null;
+    }
+    if (existingRows.length) {
+      await client.query(
+        "UPDATE wechat_outbound_messages SET status='sending',error_code=NULL,error='' WHERE id=$1",
+        [existingRows[0].id]
+      );
+      await client.query("COMMIT");
+      return { id: existingRows[0].id, status: "sending", allowed: true, retry: true };
     }
     await client.query("INSERT INTO wechat_outbound_messages(id,open_kfid,external_userid_hash,upstream_msg_id,status) VALUES($1,$2,$3,$4,'sending')", [id, openKfId, externalUserIdHash, messageId]);
     await client.query("COMMIT");
