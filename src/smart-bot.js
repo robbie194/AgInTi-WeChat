@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { decryptFile, WSClient } from "@wecom/aibot-node-sdk";
 import { config as defaultConfig } from "./config.js";
-import { cloudResultIdempotencyKey, isFailedCloudState } from "./cloud-bridge.js";
+import { cloudArtifactKind, cloudResultIdempotencyKey, isFailedCloudState } from "./cloud-bridge.js";
 import { decryptPayload } from "./encryption.js";
 import {
   claimSmartBotMessage,
@@ -331,6 +331,34 @@ export class SmartBotGroupProcessor {
     }
   }
 
+  async sendGroupMedia({ chatId, idempotencyKey, type, buffer, filename }) {
+    const reservation = await reserveGroupOutbound({
+      botId: this.config.groupBotId,
+      chatId,
+      idempotencyKey,
+    });
+    if (!reservation) return { sent: false, limited: true };
+    if (reservation.status === "sent") return { sent: true, reused: true };
+    if (!reservation.allowed) return { sent: false, unknown: reservation.status === "unknown" };
+    try {
+      const uploaded = await this.client.uploadMedia(buffer, { type, filename });
+      const response = await this.client.sendMediaMessage(chatId, type, uploaded.media_id);
+      if (Number(response?.errcode || 0) !== 0) {
+        const error = new Error(String(response?.errmsg || "WeCom Smart Bot did not accept the media reply."));
+        error.wecomCode = response?.errcode;
+        throw error;
+      }
+      await completeGroupOutbound(reservation.id, { sent: true });
+      return { sent: true };
+    } catch (error) {
+      await completeGroupOutbound(reservation.id, {
+        unknown: !error.wecomCode && !error.statusCode,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
   async work() {
     if (!this.running || this.activeTask) return this.activeTask;
     this.activeTask = (async () => {
@@ -475,18 +503,38 @@ export class SmartBotGroupProcessor {
         ? "这次 OverTree 任务因服务重启或停止而中断，结果没有完成。你可以稍后在 OverTree 会话中继续。"
         : "这次 OverTree 任务没有完成。请稍后重试，或打开 OverTree 查看任务状态。"
       : String(receipt.result || receipt.reply || "OverTree 已完成处理，请在已绑定的 Cloud 会话中查看完整记录。");
-    const fileLinks = Array.isArray(receipt.files) ? receipt.files.map((file) => String(file.url || "")).filter(Boolean) : [];
-    const linksText = fileLinks.map((url) => `文件下载：${url}`).join("\n\n");
-    const linksBytes = new TextEncoder().encode(linksText).length;
-    const summary = truncateMarkdown(result, Math.max(100, 15_000 - linksBytes - 100));
+    const summary = truncateMarkdown(result);
     const delivery = await this.sendGroupText({
       chatId,
       idempotencyKey: cloudResultIdempotencyKey(receipt, body.msgid),
-      content: [summary, linksText].filter(Boolean).join("\n\n"),
+      content: summary,
     });
     if (!delivery.sent) {
       await markSmartBotSubmitted(row.id, { cloudRequestId: row.cloud_request_id, delaySeconds: 60 });
       return;
+    }
+    const artifacts = Array.isArray(receipt.files)
+      ? receipt.files.filter((file) => cloudArtifactKind(file)).slice(0, 8)
+      : [];
+    for (const [index, file] of artifacts.entries()) {
+      if (typeof this.bridge.downloadArtifact !== "function") break;
+      try {
+        const artifact = await this.bridge.downloadArtifact(file, { maxBytes: this.config.maxMediaBytes });
+        const type = cloudArtifactKind({ ...file, name: artifact.filename, contentType: artifact.contentType });
+        if (!type) continue;
+        const media = await this.sendGroupMedia({
+          chatId,
+          idempotencyKey: `${cloudResultIdempotencyKey(receipt, body.msgid)}-artifact-${index}`,
+          type,
+          buffer: artifact.buffer,
+          filename: artifact.filename,
+        });
+        if (media.limited) break;
+        if (!media.sent) throw Object.assign(new Error("WeCom Smart Bot could not confirm media delivery."), { statusCode: 503 });
+      } catch (error) {
+        if (Number(error?.statusCode) >= 400 && Number(error.statusCode) < 500 && ![408, 409, 425, 429].includes(Number(error.statusCode))) continue;
+        throw error;
+      }
     }
     await finishSmartBotMessage(row.id);
   }

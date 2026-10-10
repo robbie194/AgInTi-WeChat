@@ -136,6 +136,33 @@ export class WeComApi {
     });
   }
 
+  async uploadMedia(buffer, { type, filename = "wechat-file" } = {}) {
+    const token = await this.accessToken();
+    const url = new URL(`${this.baseURL}/media/upload`);
+    url.searchParams.set("access_token", token);
+    url.searchParams.set("type", type);
+    const form = new FormData();
+    form.append("media", new Blob([buffer]), filename);
+    const response = await this.fetch(url, { method: "POST", body: form, signal: AbortSignal.timeout(30_000) });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.errcode) throw this.apiError(payload, response.status, "WeChat media upload failed.");
+    if (!payload.media_id) throw Object.assign(new Error("WeChat did not return a media ID."), { statusCode: 502 });
+    return String(payload.media_id);
+  }
+
+  sendMedia(openKfId, externalUserId, type, mediaId, messageId) {
+    return this.request("/kf/send_msg", {
+      method: "POST",
+      body: {
+        touser: externalUserId,
+        open_kfid: openKfId,
+        msgid: messageId,
+        msgtype: type,
+        [type]: { media_id: mediaId },
+      },
+    });
+  }
+
   async downloadMedia(mediaId, maxBytes = config.maxMediaBytes) {
     const token = await this.accessToken();
     const url = new URL(`${this.baseURL}/media/get`);

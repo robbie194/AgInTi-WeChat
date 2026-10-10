@@ -113,3 +113,34 @@ test("customer-service file downloads use the configured API base URL", async ()
   assert.equal(fileRequest.options.method, "POST");
   assert.deepEqual(JSON.parse(fileRequest.options.body), { file_id: "file-id" });
 });
+
+test("customer-service media is uploaded and sent as a native WeChat message", async () => {
+  const requests = [];
+  const api = new WeComApi({
+    corpId: "corp-test",
+    corpSecret: "test-api-secret",
+    baseURL: "https://wecom-proxy.example/cgi-bin",
+    fetchImpl: async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith("/gettoken")) return new Response(JSON.stringify({ access_token: "temporary-token", expires_in: 7200 }), { status: 200 });
+      if (pathname.endsWith("/media/upload")) return new Response(JSON.stringify({ media_id: "media-image" }), { status: 200 });
+      return new Response(JSON.stringify({ errcode: 0 }), { status: 200 });
+    },
+  });
+
+  const mediaId = await api.uploadMedia(Buffer.from("image-bytes"), { type: "image", filename: "plot.png" });
+  await api.sendMedia("kf-test", "external-test", "image", mediaId, "message-id");
+  assert.equal(mediaId, "media-image");
+  assert.equal(new URL(requests[1].url).pathname, "/cgi-bin/media/upload");
+  assert.equal(requests[1].options.method, "POST");
+  assert.ok(requests[1].options.body instanceof FormData);
+  assert.equal(new URL(requests[2].url).pathname, "/cgi-bin/kf/send_msg");
+  assert.deepEqual(JSON.parse(requests[2].options.body), {
+    touser: "external-test",
+    open_kfid: "kf-test",
+    msgid: "message-id",
+    msgtype: "image",
+    image: { media_id: "media-image" },
+  });
+});

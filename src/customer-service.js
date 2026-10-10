@@ -1,12 +1,11 @@
 import path from "node:path";
 import { decryptPayload } from "./encryption.js";
-import { cloudResultIdempotencyKey, isFailedCloudState } from "./cloud-bridge.js";
+import { cloudArtifactKind, cloudResultIdempotencyKey, isFailedCloudState } from "./cloud-bridge.js";
 import {
   claimInboundMessage,
   completeOutboundMessage,
   finishInboundMessage,
   hashExternalUserId,
-  markInboundAcked,
   markInboundSubmitted,
   reserveOutboundMessage,
   retryInboundMessage,
@@ -135,6 +134,26 @@ export class CustomerServiceProcessor {
     }
   }
 
+  async sendMedia({ openKfId, externalUserId, externalHash, stableId, type, buffer, filename }) {
+    const reservation = await reserveOutboundMessage({ openKfId, externalUserIdHash: externalHash, messageId: stableId });
+    if (!reservation) return { sent: false, limited: true };
+    if (reservation.status === "sent") return { sent: true, reused: true };
+    if (!reservation.allowed) return { sent: false, unknown: reservation.status === "unknown" };
+    try {
+      const mediaId = await this.api.uploadMedia(buffer, { type, filename });
+      await this.api.sendMedia(openKfId, externalUserId, type, mediaId, weComSendMessageId(reservation.id));
+      await completeOutboundMessage(reservation.id, { sent: true });
+      return { sent: true };
+    } catch (error) {
+      await completeOutboundMessage(reservation.id, {
+        unknown: !error.statusCode || error.statusCode >= 500,
+        errorCode: error.wecomCode,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
   async process(row) {
     const payload = decryptPayload(row.payload_enc, this.config.dataEncryptionKey);
     const openKfId = row.open_kfid;
@@ -235,17 +254,6 @@ export class CustomerServiceProcessor {
       return;
     }
     await markInboundSubmitted(row.id, { cloudRequestId: String(receipt.messageId || upstreamMessageId), delaySeconds: 3 });
-    const ageMs = Date.now() - new Date(row.received_at).getTime();
-    if (ageMs >= this.config.ackDelayMs) {
-      const ack = await this.sendText({
-        openKfId,
-        externalUserId,
-        externalHash,
-        stableId: `ack-${upstreamMessageId}`,
-        content: "已收到，OverTree 正在处理，完成后会把结果发回这里。",
-      });
-      if (ack.sent) await markInboundAcked(row.id, { delaySeconds: 3 });
-    }
   }
 
   async pollCloudMessage({ row, payload, openKfId, externalUserId, externalHash, upstreamMessageId }) {
@@ -256,19 +264,7 @@ export class CustomerServiceProcessor {
     });
     const state = cloudStatus(receipt);
     if (state === "running" || state === "queued" || state === "processing") {
-      if (!row.ack_sent_at && Date.now() - new Date(row.received_at).getTime() >= this.config.ackDelayMs) {
-        const ack = await this.sendText({
-          openKfId,
-          externalUserId,
-          externalHash,
-          stableId: `ack-${upstreamMessageId}`,
-          content: "已收到，OverTree 正在处理，完成后会把结果发回这里。",
-        });
-        if (ack.sent) await markInboundAcked(row.id, { delaySeconds: 4 });
-        else await markInboundSubmitted(row.id, { cloudRequestId: row.cloud_request_id, delaySeconds: 10 });
-      } else {
-        await markInboundSubmitted(row.id, { cloudRequestId: row.cloud_request_id, delaySeconds: 4 });
-      }
+      await markInboundSubmitted(row.id, { cloudRequestId: row.cloud_request_id, delaySeconds: 4 });
       return;
     }
     await this.deliverCloudResult({ row, receipt, openKfId, externalUserId, externalHash, upstreamMessageId });
@@ -282,24 +278,43 @@ export class CustomerServiceProcessor {
         ? "这次 OverTree 任务因服务重启或停止而中断，结果没有完成。你可以稍后在 OverTree 会话中继续。"
         : "这次 OverTree 任务没有完成。请稍后重试，或打开 OverTree 查看任务状态。"
       : String(receipt.result || receipt.reply || "OverTree 已完成处理，但没有返回可发送的文字摘要。请打开 OverTree 项目查看完整结果和文件。");
-    const fileLinks = Array.isArray(receipt.files)
-      ? receipt.files.map((file) => String(file.url || "")).filter(Boolean)
-      : [];
-    const linksText = fileLinks.map((url) => `文件下载：${url}`).join("\n\n");
-    const linksBytes = new TextEncoder().encode(linksText).length;
-    const summary = truncateUtf8(content, Math.max(100, 1800 - linksBytes - 150));
     const result = await this.sendText({
       openKfId,
       externalUserId,
       externalHash,
       stableId: cloudResultIdempotencyKey(receipt, upstreamMessageId),
-      content: [summary, linksText].filter(Boolean).join("\n\n"),
+      content: truncateUtf8(content),
     });
     if (result.limited) {
       await markInboundSubmitted(row.id, { cloudRequestId: row.cloud_request_id || upstreamMessageId, delaySeconds: 60 });
       return;
     }
     if (!result.sent) throw Object.assign(new Error("WeChat Customer Service could not confirm message delivery."), { statusCode: 503 });
+    const artifacts = Array.isArray(receipt.files)
+      ? receipt.files.filter((file) => cloudArtifactKind(file)).slice(0, 4)
+      : [];
+    for (const [index, file] of artifacts.entries()) {
+      if (typeof this.bridge.downloadArtifact !== "function") break;
+      try {
+        const artifact = await this.bridge.downloadArtifact(file, { maxBytes: this.config.maxMediaBytes });
+        const type = cloudArtifactKind({ ...file, name: artifact.filename, contentType: artifact.contentType });
+        if (!type) continue;
+        const delivery = await this.sendMedia({
+          openKfId,
+          externalUserId,
+          externalHash,
+          stableId: `${cloudResultIdempotencyKey(receipt, upstreamMessageId)}-artifact-${index}`,
+          type,
+          buffer: artifact.buffer,
+          filename: artifact.filename,
+        });
+        if (delivery.limited) break;
+        if (!delivery.sent) throw Object.assign(new Error("WeChat Customer Service could not confirm media delivery."), { statusCode: 503 });
+      } catch (error) {
+        if (Number(error?.statusCode) >= 400 && Number(error.statusCode) < 500 && ![408, 409, 425, 429].includes(Number(error.statusCode))) continue;
+        throw error;
+      }
+    }
     await finishInboundMessage(row.id, { cloudRequestId: String(receipt.messageId || upstreamMessageId) });
   }
 }

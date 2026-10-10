@@ -308,6 +308,14 @@ export async function reserveGroupOutbound({ botId, chatId, idempotencyKey }) {
       [botId, chatHash, idempotencyKey]
     );
     if (prior.length) {
+      if (prior[0].status === "failed") {
+        await client.query(
+          "UPDATE wechat_group_outbound_messages SET status='sending',error='' WHERE id=$1",
+          [prior[0].id]
+        );
+        await client.query("COMMIT");
+        return { id: prior[0].id, status: "sending", allowed: true, retry: true };
+      }
       await client.query("COMMIT");
       return { id: prior[0].id, status: prior[0].status, allowed: prior[0].status === "sending" };
     }
