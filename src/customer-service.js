@@ -32,6 +32,50 @@ function truncateUtf8(value, maxBytes = 1800) {
   return `${output}\n\n(回复较长，完整内容请在 OverTree 项目中查看。)`;
 }
 
+const MAX_WECHAT_TEXT_BYTES = 1800;
+const MAX_CLOUD_ARTIFACT_BYTES = 50 * 1024 * 1024;
+
+export function splitUtf8(value, maxBytes = MAX_WECHAT_TEXT_BYTES) {
+  const input = String(value || "");
+  if (!input) return [];
+  const chunks = [];
+  let chunk = "";
+  let bytes = 0;
+  for (const character of input) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (chunk && bytes + characterBytes > maxBytes) {
+      chunks.push(chunk);
+      chunk = "";
+      bytes = 0;
+    }
+    chunk += character;
+    bytes += characterBytes;
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks;
+}
+
+function artifactVariantKey(file) {
+  const value = String(file?.path || file?.name || "").replace(/\\/g, "/");
+  const directory = value.includes("/") ? value.slice(0, value.lastIndexOf("/")) : "";
+  const filename = value.slice(value.lastIndexOf("/") + 1).toLowerCase();
+  return `${directory}/${filename.replace(/\.[a-z0-9]{1,8}$/i, "")}`;
+}
+
+export function selectCloudArtifacts(files, limit = 4) {
+  const variants = new Map();
+  for (const file of Array.isArray(files) ? files : []) {
+    if (!cloudArtifactKind(file)) continue;
+    const key = artifactVariantKey(file);
+    const size = Number(file?.size);
+    const current = variants.get(key);
+    if (!current || (Number.isSafeInteger(size) && (!Number.isSafeInteger(Number(current.size)) || size < Number(current.size)))) {
+      variants.set(key, file);
+    }
+  }
+  return [...variants.values()].slice(0, limit);
+}
+
 export function weComSendMessageId(reservationId) {
   // The database reservation is a UUID (36 chars); WeCom kf/send_msg caps msgid at 32.
   return String(reservationId || "").replace(/-/g, "").slice(0, 32);
@@ -132,6 +176,31 @@ export class CustomerServiceProcessor {
       });
       throw error;
     }
+  }
+
+  async sendTextParts({ openKfId, externalUserId, externalHash, stableId, content, maxParts = 5, overflowNotice = "回复较长，完整内容请在 OverTree 项目会话中查看。" }) {
+    const parts = splitUtf8(content);
+    if (!parts.length) return { sent: false };
+    if (parts.length > maxParts) {
+      const notice = `\n\n${overflowNotice}`;
+      const prefixParts = parts.slice(0, maxParts - 1);
+      const lastPart = parts[maxParts - 1] || "";
+      const lastPartBudget = Math.max(0, MAX_WECHAT_TEXT_BYTES - Buffer.byteLength(notice, "utf8"));
+      const lastPrefix = splitUtf8(lastPart, lastPartBudget)[0] || "";
+      parts.splice(0, parts.length, ...prefixParts, `${lastPrefix.trimEnd()}${notice}`);
+    }
+    for (const [index, part] of parts.entries()) {
+      const result = await this.sendText({
+        openKfId,
+        externalUserId,
+        externalHash,
+        stableId: index === 0 ? stableId : `${stableId}-text-${index}`,
+        content: part,
+      });
+      if (result.limited) return { sent: index > 0, limited: true };
+      if (!result.sent) return result;
+    }
+    return { sent: true };
   }
 
   async sendMedia({ openKfId, externalUserId, externalHash, stableId, type, buffer, filename }) {
@@ -278,25 +347,37 @@ export class CustomerServiceProcessor {
         ? "这次 OverTree 任务因服务重启或停止而中断，结果没有完成。你可以稍后在 OverTree 会话中继续。"
         : "这次 OverTree 任务没有完成。请稍后重试，或打开 OverTree 查看任务状态。"
       : String(receipt.result || receipt.reply || "OverTree 已完成处理，但没有返回可发送的文字摘要。请打开 OverTree 项目查看完整结果和文件。");
-    const result = await this.sendText({
+    const variants = selectCloudArtifacts(receipt.files, Infinity);
+    const oversized = variants
+      .filter((file) => Number(file?.size) > MAX_CLOUD_ARTIFACT_BYTES)
+      .map((file) => String(file.name || file.path || "结果文件"))
+      .filter((name, index, names) => names.indexOf(name) === index);
+    const oversizedNote = oversized.length
+      ? truncateUtf8(`\n\n以下文件超过 50 MB，未发送：${oversized.slice(0, 5).join("、")}${oversized.length > 5 ? "等" : ""}。请在 OverTree 项目左侧文件区查看。`, 900)
+      : "";
+    const artifacts = variants
+      .filter((file) => !Number.isFinite(Number(file?.size)) || Number(file.size) <= MAX_CLOUD_ARTIFACT_BYTES)
+      .slice(0, 4);
+    const result = await this.sendTextParts({
       openKfId,
       externalUserId,
       externalHash,
       stableId: cloudResultIdempotencyKey(receipt, upstreamMessageId),
-      content: truncateUtf8(content),
+      content: `${content}${oversizedNote}`,
+      maxParts: Math.max(1, 5 - artifacts.length),
+      overflowNotice: `文字较长，完整内容请在 OverTree 项目会话中查看。${oversizedNote}`,
     });
     if (result.limited) {
       await markInboundSubmitted(row.id, { cloudRequestId: row.cloud_request_id || upstreamMessageId, delaySeconds: 60 });
       return;
     }
     if (!result.sent) throw Object.assign(new Error("WeChat Customer Service could not confirm message delivery."), { statusCode: 503 });
-    const artifacts = Array.isArray(receipt.files)
-      ? receipt.files.filter((file) => cloudArtifactKind(file)).slice(0, 4)
-      : [];
+    let artifactDeliveryPending = false;
     for (const [index, file] of artifacts.entries()) {
       if (typeof this.bridge.downloadArtifact !== "function") break;
       try {
-        const artifact = await this.bridge.downloadArtifact(file, { maxBytes: this.config.maxMediaBytes });
+        if (Number(file?.size) > MAX_CLOUD_ARTIFACT_BYTES) continue;
+        const artifact = await this.bridge.downloadArtifact(file, { maxBytes: MAX_CLOUD_ARTIFACT_BYTES });
         const type = cloudArtifactKind({ ...file, name: artifact.filename, contentType: artifact.contentType });
         if (!type) continue;
         const delivery = await this.sendMedia({
@@ -308,15 +389,22 @@ export class CustomerServiceProcessor {
           buffer: artifact.buffer,
           filename: artifact.filename,
         });
-        if (delivery.limited) break;
+        if (delivery.limited) {
+          artifactDeliveryPending = true;
+          break;
+        }
         if (!delivery.sent) throw Object.assign(new Error("WeChat Customer Service could not confirm media delivery."), { statusCode: 503 });
       } catch (error) {
         if (Number(error?.statusCode) >= 400 && Number(error.statusCode) < 500 && ![408, 409, 425, 429].includes(Number(error.statusCode))) continue;
         throw error;
       }
     }
+    if (artifactDeliveryPending) {
+      await markInboundSubmitted(row.id, { cloudRequestId: row.cloud_request_id || upstreamMessageId, delaySeconds: 60 });
+      return;
+    }
     await finishInboundMessage(row.id, { cloudRequestId: String(receipt.messageId || upstreamMessageId) });
   }
 }
 
-export { attachmentDetails, messageText, truncateUtf8 };
+export { attachmentDetails, messageText, truncateUtf8, MAX_CLOUD_ARTIFACT_BYTES };

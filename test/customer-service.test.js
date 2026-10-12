@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attachmentDetails, messageText, weComSendMessageId } from "../src/customer-service.js";
+import { attachmentDetails, messageText, selectCloudArtifacts, splitUtf8, weComSendMessageId } from "../src/customer-service.js";
 import { pool, reserveOutboundMessage } from "../src/db.js";
 
 test("mixed Customer Service messages retain text and extract supported media", () => {
@@ -25,6 +25,22 @@ test("mixed Customer Service messages retain text and extract supported media", 
 test("WeCom send message IDs fit the 32-character API limit", () => {
   assert.equal(weComSendMessageId("a3ea895a-3725-4f3f-bf69-5957142993df"), "a3ea895a37254f3fbf695957142993df");
   assert.equal(weComSendMessageId("a3ea895a-3725-4f3f-bf69-5957142993df").length, 32);
+});
+
+test("long WeChat replies split on UTF-8 boundaries within 1800 bytes", () => {
+  const parts = splitUtf8("结果🙂".repeat(1000));
+  assert.ok(parts.length > 1);
+  assert.ok(parts.every((part) => Buffer.byteLength(part, "utf8") <= 1800));
+  assert.equal(parts.join(""), "结果🙂".repeat(1000));
+});
+
+test("same-named Cloud artifact variants keep the smaller preview file", () => {
+  const selected = selectCloudArtifacts([
+    { name: "report.pdf", path: "outputs/report.pdf", size: 8000 },
+    { name: "report.png", path: "outputs/report.png", size: 1200 },
+    { name: "chart.png", path: "outputs/chart.png", size: 900 },
+  ]);
+  assert.deepEqual(selected.map((file) => file.name), ["report.png", "chart.png"]);
 });
 
 async function reserveWithDatabaseStub(t, { existing = [], quota = { window_open: true, count: 0 } } = {}) {
