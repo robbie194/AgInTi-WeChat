@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attachmentDetails, messageText, selectCloudArtifacts, splitUtf8, weComSendMessageId } from "../src/customer-service.js";
+import { attachmentDetails, messageText, validateCloudDeliveryPlan, weComSendMessageId } from "../src/customer-service.js";
 import { pool, reserveOutboundMessage } from "../src/db.js";
 
 test("mixed Customer Service messages retain text and extract supported media", () => {
@@ -27,20 +27,23 @@ test("WeCom send message IDs fit the 32-character API limit", () => {
   assert.equal(weComSendMessageId("a3ea895a-3725-4f3f-bf69-5957142993df").length, 32);
 });
 
-test("long WeChat replies split on UTF-8 boundaries within 1800 bytes", () => {
-  const parts = splitUtf8("结果🙂".repeat(1000));
-  assert.ok(parts.length > 1);
-  assert.ok(parts.every((part) => Buffer.byteLength(part, "utf8") <= 1800));
-  assert.equal(parts.join(""), "结果🙂".repeat(1000));
-});
-
-test("same-named Cloud artifact variants keep the smaller preview file", () => {
-  const selected = selectCloudArtifacts([
-    { name: "report.pdf", path: "outputs/report.pdf", size: 8000 },
-    { name: "report.png", path: "outputs/report.png", size: 1200 },
-    { name: "chart.png", path: "outputs/chart.png", size: 900 },
-  ]);
-  assert.deepEqual(selected.map((file) => file.name), ["report.png", "chart.png"]);
+test("Customer Service accepts only a bounded, versioned Cloud delivery plan", () => {
+  const plan = {
+    version: 1,
+    limits: { maxTextBytes: 1800, maxMessages: 5, maxMediaFiles: 4, maxArtifactBytes: 50 * 1024 * 1024 },
+    textParts: ["结果🙂"],
+    files: [{
+      name: "report.pdf", url: "https://cloud.example/file", mediaType: "file",
+      maxBytes: 50 * 1024 * 1024, size: 1200,
+    }],
+  };
+  assert.equal(validateCloudDeliveryPlan({ deliveryPlan: plan }), plan);
+  assert.throws(() => validateCloudDeliveryPlan({ deliveryPlan: { ...plan, textParts: ["🙂".repeat(500)] } }), /unsupported/);
+  assert.throws(() => validateCloudDeliveryPlan({ deliveryPlan: { ...plan, version: 2 } }), /unsupported/);
+  assert.throws(() => validateCloudDeliveryPlan({ deliveryPlan: {
+    ...plan,
+    limits: { ...plan.limits, maxArtifactBytes: 100 * 1024 * 1024 },
+  } }), /unsupported/);
 });
 
 async function reserveWithDatabaseStub(t, { existing = [], quota = { window_open: true, count: 0 } } = {}) {

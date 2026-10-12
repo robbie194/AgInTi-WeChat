@@ -1,6 +1,6 @@
 import path from "node:path";
 import { decryptPayload } from "./encryption.js";
-import { cloudArtifactKind, cloudResultIdempotencyKey, isFailedCloudState } from "./cloud-bridge.js";
+import { cloudResultIdempotencyKey } from "./cloud-bridge.js";
 import {
   claimInboundMessage,
   completeOutboundMessage,
@@ -11,6 +11,32 @@ import {
   retryInboundMessage,
 } from "./db.js";
 
+const WECHAT_DELIVERY_PLAN_V1_LIMITS = Object.freeze({
+  maxTextBytes: 1800,
+  maxMessages: 5,
+  maxMediaFiles: 4,
+  maxArtifactBytes: 50 * 1024 * 1024,
+});
+
+export function validateCloudDeliveryPlan(receipt) {
+  const plan = receipt?.deliveryPlan;
+  const invalid = () => Object.assign(new Error("OverTree Cloud returned an unsupported WeChat delivery plan."), { statusCode: 502 });
+  if (!plan || plan.version !== 1 || !plan.limits || !Array.isArray(plan.textParts) || !Array.isArray(plan.files)) throw invalid();
+  const { maxTextBytes, maxMessages, maxMediaFiles, maxArtifactBytes } = plan.limits;
+  if (![maxTextBytes, maxMessages, maxMediaFiles, maxArtifactBytes].every((value) => Number.isSafeInteger(value) && value > 0)) throw invalid();
+  if (Object.entries(WECHAT_DELIVERY_PLAN_V1_LIMITS).some(([key, value]) => plan.limits[key] !== value)) throw invalid();
+  if (!plan.textParts.length || plan.files.length > maxMediaFiles || plan.files.length > maxMessages) throw invalid();
+  if (plan.textParts.length + plan.files.length > maxMessages) throw invalid();
+  if (plan.textParts.some((part) => typeof part !== "string" || Buffer.byteLength(part, "utf8") > maxTextBytes)) throw invalid();
+  for (const file of plan.files) {
+    if (!file || typeof file !== "object" || typeof file.url !== "string" || !file.url
+      || typeof file.name !== "string" || !file.name || !["image", "file"].includes(file.mediaType)) throw invalid();
+    if (file.maxBytes !== maxArtifactBytes) throw invalid();
+    if (file.size !== null && (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > file.maxBytes)) throw invalid();
+  }
+  return plan;
+}
+
 function safeLog(level, message, data = {}) {
   const safe = Object.fromEntries(Object.entries(data).filter(([key]) => /status|code|attempt|messageid|transport/i.test(key)));
   console[level](message, safe);
@@ -20,6 +46,8 @@ function cleanText(value) {
   return String(value || "").replace(/\u0000/g, "").trim();
 }
 
+// Used by the separately disabled Smart Bot transport; Customer Service result
+// delivery now consumes the versioned plan prepared by OverTree Cloud.
 function truncateUtf8(value, maxBytes = 1800) {
   const input = String(value || "");
   const encoder = new TextEncoder();
@@ -30,50 +58,6 @@ function truncateUtf8(value, maxBytes = 1800) {
     output += character;
   }
   return `${output}\n\n(回复较长，完整内容请在 OverTree 项目中查看。)`;
-}
-
-const MAX_WECHAT_TEXT_BYTES = 1800;
-const MAX_CLOUD_ARTIFACT_BYTES = 50 * 1024 * 1024;
-
-export function splitUtf8(value, maxBytes = MAX_WECHAT_TEXT_BYTES) {
-  const input = String(value || "");
-  if (!input) return [];
-  const chunks = [];
-  let chunk = "";
-  let bytes = 0;
-  for (const character of input) {
-    const characterBytes = Buffer.byteLength(character, "utf8");
-    if (chunk && bytes + characterBytes > maxBytes) {
-      chunks.push(chunk);
-      chunk = "";
-      bytes = 0;
-    }
-    chunk += character;
-    bytes += characterBytes;
-  }
-  if (chunk) chunks.push(chunk);
-  return chunks;
-}
-
-function artifactVariantKey(file) {
-  const value = String(file?.path || file?.name || "").replace(/\\/g, "/");
-  const directory = value.includes("/") ? value.slice(0, value.lastIndexOf("/")) : "";
-  const filename = value.slice(value.lastIndexOf("/") + 1).toLowerCase();
-  return `${directory}/${filename.replace(/\.[a-z0-9]{1,8}$/i, "")}`;
-}
-
-export function selectCloudArtifacts(files, limit = 4) {
-  const variants = new Map();
-  for (const file of Array.isArray(files) ? files : []) {
-    if (!cloudArtifactKind(file)) continue;
-    const key = artifactVariantKey(file);
-    const size = Number(file?.size);
-    const current = variants.get(key);
-    if (!current || (Number.isSafeInteger(size) && (!Number.isSafeInteger(Number(current.size)) || size < Number(current.size)))) {
-      variants.set(key, file);
-    }
-  }
-  return [...variants.values()].slice(0, limit);
 }
 
 export function weComSendMessageId(reservationId) {
@@ -165,7 +149,7 @@ export class CustomerServiceProcessor {
     if (reservation.status === "sent") return { sent: true, reused: true };
     if (!reservation.allowed) return { sent: false, unknown: reservation.status === "unknown" };
     try {
-      await this.api.sendText(openKfId, externalUserId, truncateUtf8(content), weComSendMessageId(reservation.id));
+      await this.api.sendText(openKfId, externalUserId, content, weComSendMessageId(reservation.id));
       await completeOutboundMessage(reservation.id, { sent: true });
       return { sent: true };
     } catch (error) {
@@ -176,31 +160,6 @@ export class CustomerServiceProcessor {
       });
       throw error;
     }
-  }
-
-  async sendTextParts({ openKfId, externalUserId, externalHash, stableId, content, maxParts = 5, overflowNotice = "回复较长，完整内容请在 OverTree 项目会话中查看。" }) {
-    const parts = splitUtf8(content);
-    if (!parts.length) return { sent: false };
-    if (parts.length > maxParts) {
-      const notice = `\n\n${overflowNotice}`;
-      const prefixParts = parts.slice(0, maxParts - 1);
-      const lastPart = parts[maxParts - 1] || "";
-      const lastPartBudget = Math.max(0, MAX_WECHAT_TEXT_BYTES - Buffer.byteLength(notice, "utf8"));
-      const lastPrefix = splitUtf8(lastPart, lastPartBudget)[0] || "";
-      parts.splice(0, parts.length, ...prefixParts, `${lastPrefix.trimEnd()}${notice}`);
-    }
-    for (const [index, part] of parts.entries()) {
-      const result = await this.sendText({
-        openKfId,
-        externalUserId,
-        externalHash,
-        stableId: index === 0 ? stableId : `${stableId}-text-${index}`,
-        content: part,
-      });
-      if (result.limited) return { sent: index > 0, limited: true };
-      if (!result.sent) return result;
-    }
-    return { sent: true };
   }
 
   async sendMedia({ openKfId, externalUserId, externalHash, stableId, type, buffer, filename }) {
@@ -340,52 +299,33 @@ export class CustomerServiceProcessor {
   }
 
   async deliverCloudResult({ row, receipt, openKfId, externalUserId, externalHash, upstreamMessageId }) {
-    const state = cloudStatus(receipt);
-    const failed = isFailedCloudState(state);
-    const content = failed
-      ? state === "stopped"
-        ? "这次 OverTree 任务因服务重启或停止而中断，结果没有完成。你可以稍后在 OverTree 会话中继续。"
-        : "这次 OverTree 任务没有完成。请稍后重试，或打开 OverTree 查看任务状态。"
-      : String(receipt.result || receipt.reply || "OverTree 已完成处理，但没有返回可发送的文字摘要。请打开 OverTree 项目查看完整结果和文件。");
-    const variants = selectCloudArtifacts(receipt.files, Infinity);
-    const oversized = variants
-      .filter((file) => Number(file?.size) > MAX_CLOUD_ARTIFACT_BYTES)
-      .map((file) => String(file.name || file.path || "结果文件"))
-      .filter((name, index, names) => names.indexOf(name) === index);
-    const oversizedNote = oversized.length
-      ? truncateUtf8(`\n\n以下文件超过 50 MB，未发送：${oversized.slice(0, 5).join("、")}${oversized.length > 5 ? "等" : ""}。请在 OverTree 项目左侧文件区查看。`, 900)
-      : "";
-    const artifacts = variants
-      .filter((file) => !Number.isFinite(Number(file?.size)) || Number(file.size) <= MAX_CLOUD_ARTIFACT_BYTES)
-      .slice(0, 4);
-    const result = await this.sendTextParts({
-      openKfId,
-      externalUserId,
-      externalHash,
-      stableId: cloudResultIdempotencyKey(receipt, upstreamMessageId),
-      content: `${content}${oversizedNote}`,
-      maxParts: Math.max(1, 5 - artifacts.length),
-      overflowNotice: `文字较长，完整内容请在 OverTree 项目会话中查看。${oversizedNote}`,
-    });
-    if (result.limited) {
-      await markInboundSubmitted(row.id, { cloudRequestId: row.cloud_request_id || upstreamMessageId, delaySeconds: 60 });
-      return;
+    const plan = validateCloudDeliveryPlan(receipt);
+    const stableId = cloudResultIdempotencyKey(receipt, upstreamMessageId);
+    for (const [index, content] of plan.textParts.entries()) {
+      const delivery = await this.sendText({
+        openKfId,
+        externalUserId,
+        externalHash,
+        stableId: index === 0 ? stableId : `${stableId}-text-${index}`,
+        content,
+      });
+      if (delivery.limited) {
+        await markInboundSubmitted(row.id, { cloudRequestId: row.cloud_request_id || upstreamMessageId, delaySeconds: 60 });
+        return;
+      }
+      if (!delivery.sent) throw Object.assign(new Error("WeChat Customer Service could not confirm message delivery."), { statusCode: 503 });
     }
-    if (!result.sent) throw Object.assign(new Error("WeChat Customer Service could not confirm message delivery."), { statusCode: 503 });
     let artifactDeliveryPending = false;
-    for (const [index, file] of artifacts.entries()) {
-      if (typeof this.bridge.downloadArtifact !== "function") break;
+    for (const [index, file] of plan.files.entries()) {
+      if (typeof this.bridge.downloadArtifact !== "function") throw Object.assign(new Error("WeChat Customer Service has no Cloud artifact downloader."), { statusCode: 503 });
       try {
-        if (Number(file?.size) > MAX_CLOUD_ARTIFACT_BYTES) continue;
-        const artifact = await this.bridge.downloadArtifact(file, { maxBytes: MAX_CLOUD_ARTIFACT_BYTES });
-        const type = cloudArtifactKind({ ...file, name: artifact.filename, contentType: artifact.contentType });
-        if (!type) continue;
+        const artifact = await this.bridge.downloadArtifact(file, { maxBytes: file.maxBytes });
         const delivery = await this.sendMedia({
           openKfId,
           externalUserId,
           externalHash,
           stableId: `${cloudResultIdempotencyKey(receipt, upstreamMessageId)}-artifact-${index}`,
-          type,
+          type: file.mediaType,
           buffer: artifact.buffer,
           filename: artifact.filename,
         });
@@ -407,4 +347,4 @@ export class CustomerServiceProcessor {
   }
 }
 
-export { attachmentDetails, messageText, truncateUtf8, MAX_CLOUD_ARTIFACT_BYTES };
+export { attachmentDetails, messageText, truncateUtf8 };
