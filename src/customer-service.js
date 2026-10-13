@@ -105,6 +105,14 @@ function cloudStatus(payload) {
   return String(payload.status || payload.state || "running").toLowerCase();
 }
 
+export function bindingClaimReply(result) {
+  if (result?.ok === false && result.reason === "already_bound") {
+    return "这个微信客服账号已绑定 OverTree 会话。请先登录 OverTree Cloud，打开项目中的「微信连接」，取消当前连接，再发送新的连接码重新绑定。";
+  }
+  if (result?.ok === false) return "绑定码无效或已过期，请回到 OverTree 重新生成。";
+  return "微信已绑定到你的 OverTree 账号。现在可以直接发送问题；新会话和文件都会进入你选定的云端项目。";
+}
+
 export class CustomerServiceProcessor {
   constructor({ config, api, bridge, pollIntervalMs = 1000 }) {
     this.config = config;
@@ -225,7 +233,7 @@ export class CustomerServiceProcessor {
         externalUserId,
         externalHash,
         stableId: `bind-${upstreamMessageId}`,
-        content: result.ok === false ? "绑定码无效或已过期，请回到 OverTree 重新生成。" : "微信已绑定到你的 OverTree 账号。现在可以直接发送问题；新会话和文件都会进入你选定的云端项目。",
+        content: bindingClaimReply(result),
       });
       await finishInboundMessage(row.id);
       return;

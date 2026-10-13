@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attachmentDetails, messageText, validateCloudDeliveryPlan, weComSendMessageId } from "../src/customer-service.js";
+import { attachmentDetails, bindingClaimReply, messageText, validateCloudDeliveryPlan, weComSendMessageId } from "../src/customer-service.js";
 import { pool, reserveOutboundMessage } from "../src/db.js";
 
 test("mixed Customer Service messages retain text and extract supported media", () => {
@@ -25,6 +25,14 @@ test("mixed Customer Service messages retain text and extract supported media", 
 test("WeCom send message IDs fit the 32-character API limit", () => {
   assert.equal(weComSendMessageId("a3ea895a-3725-4f3f-bf69-5957142993df"), "a3ea895a37254f3fbf695957142993df");
   assert.equal(weComSendMessageId("a3ea895a-3725-4f3f-bf69-5957142993df").length, 32);
+});
+
+test("Customer Service gives recovery instructions for an already-bound WeChat account", () => {
+  assert.match(bindingClaimReply({ ok: false, reason: "already_bound" }), /微信客服账号已绑定 OverTree 会话/);
+  assert.match(bindingClaimReply({ ok: false, reason: "already_bound" }), /「微信连接」/);
+  assert.match(bindingClaimReply({ ok: false, reason: "already_bound" }), /取消当前连接/);
+  assert.match(bindingClaimReply({ ok: false }), /绑定码无效或已过期/);
+  assert.match(bindingClaimReply({ ok: true }), /微信已绑定到你的 OverTree 账号/);
 });
 
 test("Customer Service accepts only a bounded, versioned Cloud delivery plan", () => {
