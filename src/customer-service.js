@@ -224,6 +224,19 @@ export class CustomerServiceProcessor {
       return;
     }
 
+    // Reject at ingress, before even interpreting a binding code or looking up
+    // Cloud. A voice transcript or mixed-message caption is not a text input.
+    if (message.msgtype !== "text") {
+      const delivery = await this.sendText({
+        openKfId, externalUserId, externalHash,
+        stableId: `unsupported-${upstreamMessageId}`,
+        content: "暂时只支持文字消息，请用文字描述你的问题。",
+      });
+      if (!delivery.sent) throw Object.assign(new Error("Could not deliver the text-only input notice."), { statusCode: 503 });
+      await finishInboundMessage(row.id);
+      return;
+    }
+
     const text = messageText(message);
     const code = extractLinkCode(text);
     if (code) {

@@ -97,3 +97,39 @@ test("outbound replies wait for a new customer message after the 48-hour window 
 
   assert.equal(result, null);
 });
+
+test("non-text customer input replies locally before any Cloud or attachment access", async (t) => {
+  const { CustomerServiceProcessor } = await import("../src/customer-service.js");
+  const finished = [];
+  t.mock.method(pool, "query", async (sql, values) => { finished.push({ sql, values }); return { rows: [] }; });
+  const noCalls = new Proxy({}, { get: (_target, key) => () => assert.fail(`Unexpected Cloud/media call: ${String(key)}`) });
+  const worker = new CustomerServiceProcessor({ config: {}, api: noCalls, bridge: noCalls });
+  const sent = [];
+  worker.sendText = async (message) => { sent.push(message); return { sent: true }; };
+  for (const msgtype of ["voice", "image", "file", "video", "location", "link", "mixed", "unknown", undefined]) {
+    await worker.processNewMessage({ row: { id: 1 }, payload: {
+      origin: 3, msgtype, voice: { content: "ABC23456" }, text: { content: "ABC23456" },
+      mixed: { msg_item: [{ msgtype: "text", text: { content: "ABC23456" } }] },
+    }, openKfId: "kf", externalUserId: "user", externalHash: "hash", upstreamMessageId: `source-${msgtype}` });
+  }
+  assert.equal(sent.length, 9);
+  assert.ok(sent.every((item) => item.content === "暂时只支持文字消息，请用文字描述你的问题。"));
+  assert.ok(sent.every((item) => item.stableId.startsWith("unsupported-source-")));
+  assert.equal(finished.length, 9);
+  // Agent/system events must remain silent.
+  await worker.processNewMessage({ row: { id: 2 }, payload: { origin: 5, msgtype: "image" } });
+  assert.equal(sent.length, 9);
+});
+
+test("text binding messages still use the normal Cloud binding path", async (t) => {
+  const { CustomerServiceProcessor } = await import("../src/customer-service.js");
+  t.mock.method(pool, "query", async () => ({ rows: [] }));
+  const claims = [];
+  const worker = new CustomerServiceProcessor({ config: {}, api: {}, bridge: {
+    claimBinding: async (body) => { claims.push(body); return { ok: true }; },
+  } });
+  worker.sendText = async () => ({ sent: true });
+  await worker.processNewMessage({ row: { id: 1 }, payload: { origin: 3, msgtype: "text", text: { content: "ABC23456" } },
+    openKfId: "kf", externalUserId: "user", externalHash: "hash", upstreamMessageId: "text-code" });
+  assert.deepEqual(claims, [{ code: "ABC23456", openKfId: "kf", externalUserId: "user" }]);
+});
